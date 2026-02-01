@@ -1,8 +1,8 @@
 from memory import calendar_events, event_count
 from datetime import datetime
-event_count = 0
 
 def create_event(title, start_time, end_time, participants = None, notes=""):
+    global event_count
     event_count += 1
     calendar_events[event_count] = {
         "event_id": event_count, 

@@ -40,7 +40,7 @@ def agent_process(user_message, conversation_id):
 
     if "schedule" in message_lower or "create" in message_lower:
         event = create_event(user_message, "2026-02-02T12:00", "2026-02-02T12:45")
-        reply = f"Got it! Scheduled: {event['title']} at {event['start']}"
+        reply = f"Got it! Scheduled: {event['title']} at {event['start_time']}"
         metadata["events_created"] = [event]
     elif "delete" in message_lower:
         events = query_event()
