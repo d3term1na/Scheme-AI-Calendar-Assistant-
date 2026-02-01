@@ -1,47 +1,45 @@
 from fastapi import FastAPI, Request
-import json
+from fastapi.staticfiles import StaticFiles
 from memory import conversation_memory
 from tools import create_event, query_event, update_event, delete_event
 
 app = FastAPI()
 
-@app.post("/chat")
-# async def chat_endpoint(request: Request):
-#     body = await request.json()  # <-- Parse JSON
-#     user_message = body["message"]
-#     # Pass message to agent logic
-#     agent_reply = agent_process(user_message)
-#     return {"reply": agent_reply, "requires_clarification": False, "metadata": {}}
 
+# -----------------------------
+# Endpoints
+# -----------------------------
+@app.post("/chat")
 async def chat_endpoint(request: Request):
+    print("Endpoint hit!")  # <-- confirm request arrived
     body = await request.json()
+    print("Received body:", body)  # debug
     conversation_id = body.get("conversation_id", "default")
     user_message = body.get("message", "")
 
     reply, metadata = agent_process(user_message, conversation_id)
-
+    print("Sending reply:", reply)  # debug
     return {
         "reply": reply,
         "requires_clarification": False,
         "metadata": metadata
     }
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
-
+# Serve frontend
+app.mount("/", StaticFiles(directory="frontend", html=True), name="frontend")
+# -----------------------------
+# Agent logic
+# -----------------------------
 def agent_process(user_message, conversation_id):
     history = conversation_memory.get(conversation_id, [])
     history.append({"user": user_message})
 
-    # Simple intent detection
     message_lower = user_message.lower()
     reply = ""
     metadata = {}
 
     if "schedule" in message_lower or "create" in message_lower:
-        # naive parsing for demo
-        event = create_event(title=user_message, start="2026-02-02T12:00", end="2026-02-02T12:45")
+        event = create_event(user_message, "2026-02-02T12:00", "2026-02-02T12:45")
         reply = f"Got it! Scheduled: {event['title']} at {event['start']}"
         metadata["events_created"] = [event]
     elif "delete" in message_lower:
@@ -63,5 +61,11 @@ def agent_process(user_message, conversation_id):
 
     history.append({"agent": reply})
     conversation_memory[conversation_id] = history
-
     return reply, metadata
+
+# -----------------------------
+# Run server
+# -----------------------------
+# if __name__ == "__main__":
+#     import uvicorn
+#     uvicorn.run(app, host="0.0.0.0", port=5500)

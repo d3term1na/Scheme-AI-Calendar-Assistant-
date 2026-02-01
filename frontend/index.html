@@ -1,0 +1,101 @@
+<!-- <div id="chat"></div>
+<input id="message" />
+<button id="send">Send</button>
+
+<script>
+const chat = document.getElementById('chat')
+document.getElementById('send').onclick = async () => {
+  const msg = document.getElementById('message').value
+  chat.innerHTML += `<div class="user">${msg}</div>`
+  
+  // show loading
+  const loadingBubble = document.createElement('div')
+  loadingBubble.className = 'agent'
+  loadingBubble.textContent = 'Thinking...'
+  chat.appendChild(loadingBubble)
+  
+  // send to backend
+  const res = await fetch('/chat', { method:'POST', body: JSON.stringify({message: msg}) })
+  const data = await res.json()
+  
+  // replace loading with actual response
+  loadingBubble.textContent = data.reply
+}
+</script> -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>AI Calendar Assistant</title>
+<style>
+body { font-family: Arial; margin: 20px; }
+#chat { border: 1px solid #ccc; padding: 10px; height: 400px; overflow-y: auto; display: flex; flex-direction: column; }
+.message { margin: 5px 0; padding: 5px 10px; border-radius: 5px; max-width: 70%; }
+.user { background-color: #d1e7dd; align-self: flex-end; margin-left: auto; }
+.agent { background-color: #f8d7da; align-self: flex-start; margin-right: auto; }
+#inputArea { margin-top: 10px; display: flex; }
+#message { flex: 1; padding: 5px; }
+#send { padding: 5px 10px; margin-left: 5px; }
+</style>
+</head>
+<body>
+<h2>AI Calendar Assistant</h2>
+<div id="chat"></div>
+<div id="inputArea">
+<input type="text" id="message" placeholder="Type your message..." />
+<button id="send">Send</button>
+</div>
+
+<script>
+const chat = document.getElementById('chat');
+const messageInput = document.getElementById('message');
+const sendButton = document.getElementById('send');
+const conversationId = "default";
+
+sendButton.onclick = async () => {
+  const msg = messageInput.value.trim();
+  if (!msg) return;
+
+  // Show user message
+  const userBubble = document.createElement('div');
+  userBubble.className = 'message user';
+  userBubble.textContent = msg;
+  chat.appendChild(userBubble);
+  messageInput.value = '';
+
+  // Show loading
+  const loadingBubble = document.createElement('div');
+  loadingBubble.className = 'message agent';
+  loadingBubble.textContent = 'Thinking...';
+  chat.appendChild(loadingBubble);
+  chat.scrollTop = chat.scrollHeight;
+
+  try {
+    // FIX: Ensure fetch matches FastAPI endpoint exactly and includes Content-Type
+    const res = await fetch('/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ conversation_id: conversationId, message: msg })
+    });
+
+    if (!res.ok) {
+      // handle 405 or other HTTP errors
+      loadingBubble.textContent = `Error: ${res.status} ${res.statusText}`;
+      return;
+    }
+
+    const data = await res.json();
+    loadingBubble.textContent = data.reply || "No reply from server";
+    chat.scrollTop = chat.scrollHeight;
+  } catch (err) {
+    loadingBubble.textContent = "Error: could not reach backend";
+    console.error(err);
+  }
+};
+
+messageInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') sendButton.click();
+});
+</script>
+</body>
+</html>

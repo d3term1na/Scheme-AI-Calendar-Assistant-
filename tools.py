@@ -1,5 +1,6 @@
 from memory import calendar_events, event_count
 from datetime import datetime
+event_count = 0
 
 def create_event(title, start_time, end_time, participants = None, notes=""):
     event_count += 1
