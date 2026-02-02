@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from memory import conversation_memory
-from tools import create_event, query_event, update_event, delete_event
+from tools import create_event, query_event, update_event, delete_event, store_embedding, embed_model, retrieve_top_k, call_ollama
 
 app = FastAPI()
 
@@ -28,7 +28,7 @@ app.mount("/", StaticFiles(directory="frontend", html=True), name="frontend")
 # -----------------------------
 # Agent logic
 # -----------------------------
-def agent_process(user_message, conversation_id):
+def agent_process(user_message, conversation_id="default"):
     history = conversation_memory.get(conversation_id, [])
     history.append({"user": user_message})
 
@@ -61,11 +61,62 @@ def agent_process(user_message, conversation_id):
             reply = f"Updated event: {updated['title']}"
             metadata["events_updated"] = [updated]
     else:
-        reply = "I can schedule, delete, or list events. Try something like 'Schedule lunch with Bob'."
+        store_embedding(f"User: {user_message}", doc_type="conversation")
+        query_vec = embed_model.encode(user_message)
+        top_docs = retrieve_top_k(query_vec, k=3)
+        context_text = "\n".join(top_docs) or "No relevant context."
+        prompt = f"""
+        You are a helpful AI calendar assistant.
+        Use the following context to answer the user's question:
+
+        Context:
+        {context_text}
+
+        User message: {user_message}
+
+        Provide a concise, helpful, friendly response.
+        """
+        reply = call_ollama(prompt)
+        metadata["retrieved_docs"] = top_docs
+    history.append({"agent": reply})
+    conversation_memory[conversation_id] = history
+
+    return reply, metadata
 
     history.append({"agent": reply})
     conversation_memory[conversation_id] = history
     return reply, metadata
+    # # Initialize conversation memory if needed
+    # history = conversation_memory.get(conversation_id, [])
+    # history.append({"user": user_message})
+
+    # # 1️⃣ Store embedding for this user message
+    # store_embedding(f"User: {user_message}", doc_type="conversation")
+
+    # # 2️⃣ Retrieve top relevant context
+    # query_vec = embed_model.encode(user_message)
+    # top_docs = retrieve_top_k(query_vec, k=3)
+    # context_text = "\n".join(top_docs) or "No relevant context."
+
+    # # 3️⃣ Build prompt
+    # prompt = f"""
+    # You are a helpful AI calendar assistant.
+    # Use the following context to answer the user's question:
+
+    # Context:
+    # {context_text}
+
+    # User message: {user_message}
+
+    # Provide a concise, helpful, friendly response.
+    # """
+
+    # # 4️⃣ Call Ollama
+    # reply = call_ollama(prompt)
+    # history.append({"agent": reply})
+
+    # conversation_memory[conversation_id] = history
+    # return reply, {"retrieved_docs": top_docs}
 
 # -----------------------------
 # Run server

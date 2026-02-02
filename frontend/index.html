@@ -30,9 +30,13 @@ document.getElementById('send').onclick = async () => {
 <style>
 body { font-family: Arial; margin: 20px; }
 #chat { border: 1px solid #ccc; padding: 10px; height: 400px; overflow-y: auto; display: flex; flex-direction: column; }
-.message { margin: 5px 0; padding: 5px 10px; border-radius: 5px; max-width: 70%; }
+.message { margin: 5px 0; padding: 5px 10px; border-radius: 5px; max-width: 70%; animation: fadeIn 0.2s ease-out; }
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(5px); }
+    to { opacity: 1; transform: translateY(0); }
+}
 .user { background-color: #d1e7dd; align-self: flex-end; margin-left: auto; }
-.agent { background-color: #f8d7da; align-self: flex-start; margin-right: auto; }
+.agent { background-color: #f8d7da; align-self: flex-start; margin-right: auto; font-style: italic; }
 #inputArea { margin-top: 10px; display: flex; }
 #message { flex: 1; padding: 5px; }
 #send { padding: 5px 10px; margin-left: 5px; }
@@ -55,6 +59,9 @@ const conversationId = "default";
 sendButton.onclick = async () => {
   const msg = messageInput.value.trim();
   if (!msg) return;
+
+  // Disable button until reply comes
+  sendButton.disabled = true;
 
   // Show user message
   const userBubble = document.createElement('div');
@@ -83,18 +90,19 @@ sendButton.onclick = async () => {
       loadingBubble.textContent = `Error: ${res.status} ${res.statusText}`;
       return;
     }
-
     const data = await res.json();
     loadingBubble.textContent = data.reply || "No reply from server";
-    chat.scrollTop = chat.scrollHeight;
   } catch (err) {
     loadingBubble.textContent = "Error: could not reach backend";
     console.error(err);
+  } finally {
+    sendButton.disabled = false;  // re-enable
+    chat.scrollTop = chat.scrollHeight;
   }
 };
 
 messageInput.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') sendButton.click();
+  if (e.key === 'Enter' && !sendButton.disabled) sendButton.click();
 });
 </script>
 </body>

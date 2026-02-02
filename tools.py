@@ -1,5 +1,48 @@
-from memory import calendar_events, event_count
+from memory import calendar_events, event_count, embeddings, next_id
 from datetime import datetime
+import numpy as np
+from sentence_transformers import SentenceTransformer
+import requests
+from numpy.linalg import norm
+
+# Embedding model
+embed_model = SentenceTransformer('all-MiniLM-L6-v2')
+
+# Ollama LLM
+OLLAMA_URL = "http://localhost:11434/api/generate"
+MODEL_NAME = "gemma3:270m"
+
+def call_ollama(prompt):
+    payload = {"model": MODEL_NAME, "prompt": prompt, "stream": False}
+    try:
+        res = requests.post(OLLAMA_URL, json=payload, timeout=60)
+        res.raise_for_status()
+        data = res.json()
+        return data.get("response", "No reply from Ollama")
+    except Exception as e:
+        print("Ollama error:", e)
+        return "Sorry, I couldn't process your request."
+
+
+def store_embedding(content, doc_type="conversation"):
+    """Store embedding in the in-memory dictionary"""
+    global next_id
+    vector = embed_model.encode(content)
+    embeddings[next_id] = {"content": content, "vector": vector, "type": doc_type}
+    next_id += 1
+    return next_id - 1
+
+def retrieve_top_k(query_vector, k=3):
+    """Retrieve top-k most similar embeddings"""
+
+    scored = [(doc, cosine_similarity(query_vector, data["vector"]))
+              for doc, data in embeddings.items()]
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return [embeddings[doc]["content"] for doc, score in scored[:k]]
+
+def cosine_similarity(a, b):
+        return np.dot(a, b) / (norm(a) * norm(b))
+
 
 def create_event(title, start_time, end_time, participants = None, notes=""):
     global event_count
