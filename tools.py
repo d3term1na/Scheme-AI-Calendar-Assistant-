@@ -13,7 +13,7 @@ OLLAMA_URL = "http://localhost:11434/api/generate"
 MODEL_NAME = "gemma3:270m"
 
 def call_ollama(prompt):
-    payload = {"model": MODEL_NAME, "prompt": prompt, "stream": False}
+    payload = {"model": MODEL_NAME, "prompt": prompt, "stream": False, "temperature": 0.2}
     try:
         res = requests.post(OLLAMA_URL, json=payload, timeout=60)
         res.raise_for_status()

@@ -66,15 +66,23 @@ def agent_process(user_message, conversation_id="default"):
         top_docs = retrieve_top_k(query_vec, k=3)
         context_text = "\n".join(top_docs) or "No relevant context."
         prompt = f"""
-        You are a helpful AI calendar assistant.
-        Use the following context to answer the user's question:
+        You are an AI calendar assistant.
 
-        Context:
+        Your job:
+        - Help users schedule, update, delete, and query calendar events.
+        - Ask clarifying questions if information is missing.
+        - Be concise and practical.
+        - Do NOT hallucinate events.
+        - If no action is required, respond conversationally.
+
+        Always respond in plain English.
+
+        User message:
         {context_text}
 
         User message: {user_message}
 
-        Provide a concise, helpful, friendly response.
+        Assistant:
         """
         reply = call_ollama(prompt)
         metadata["retrieved_docs"] = top_docs
