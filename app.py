@@ -11,9 +11,7 @@ app = FastAPI()
 # -----------------------------
 @app.post("/chat")
 async def chat_endpoint(request: Request):
-    print("Endpoint hit!")  # <-- confirm request arrived
     body = await request.json()
-    print("Received body:", body)  # debug
     conversation_id = body.get("conversation_id", "default")
     user_message = body.get("message", "")
 
@@ -45,7 +43,7 @@ def agent_process(user_message, conversation_id):
     elif "delete" in message_lower:
         events = query_event()
         if events:
-            deleted = delete_event(events[0]["id"])
+            deleted = delete_event(events[0]["event_id"])
             reply = f"Deleted event: {deleted['title']}"
             metadata["events_deleted"] = [deleted]
         else:
@@ -56,6 +54,12 @@ def agent_process(user_message, conversation_id):
             reply = "Your events:\n" + "\n".join([e["title"] for e in events])
         else:
             reply = "No events found."
+    elif "update" in message_lower or "change" in message_lower:
+        events = query_event()
+        if events:
+            updated = update_event(events[0]["event_id"],title=user_message)
+            reply = f"Updated event: {updated['title']}"
+            metadata["events_updated"] = [updated]
     else:
         reply = "I can schedule, delete, or list events. Try something like 'Schedule lunch with Bob'."
 

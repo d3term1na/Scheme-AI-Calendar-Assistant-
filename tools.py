@@ -3,7 +3,6 @@ from datetime import datetime
 
 def create_event(title, start_time, end_time, participants = None, notes=""):
     global event_count
-    event_count += 1
     calendar_events[event_count] = {
         "event_id": event_count, 
         "title": title, 
@@ -12,7 +11,9 @@ def create_event(title, start_time, end_time, participants = None, notes=""):
         "participants": participants or [], 
         "notes": notes
     }
-    return calendar_events[event_count]
+    event = calendar_events[event_count]
+    event_count += 1
+    return event
 
     
 def update_event(event_id, **updates):
@@ -22,8 +23,8 @@ def update_event(event_id, **updates):
     return None
 
 def delete_event(event_id):
-    calendar_events.pop(event_count)
-    return
+    event = calendar_events.pop(event_id)
+    return event
 
 def query_event(start_date=None, end_date=None, participants=None, keyword=None):
     '''
