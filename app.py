@@ -40,6 +40,8 @@ def agent_process(user_message, conversation_id="default"):
         event = create_event(user_message, "2026-02-02T12:00", "2026-02-02T12:45")
         reply = f"Got it! Scheduled: {event['title']} at {event['start_time']}"
         metadata["events_created"] = [event]
+        content = f"{event['title']} from {event['start_time']} to {event['end_time']}"
+        store_embedding(content, doc_type="event")
     elif "delete" in message_lower:
         events = query_event()
         if events:
@@ -61,36 +63,37 @@ def agent_process(user_message, conversation_id="default"):
             reply = f"Updated event: {updated['title']}"
             metadata["events_updated"] = [updated]
     else:
-        store_embedding(f"User: {user_message}", doc_type="conversation")
         query_vec = embed_model.encode(user_message)
         top_docs = retrieve_top_k(query_vec, k=3)
         context_text = "\n".join(top_docs) or "No relevant context."
         prompt = f"""
         You are an AI calendar assistant.
 
-        Your job:
-        - Help users schedule, update, delete, and query calendar events.
-        - Ask clarifying questions if information is missing.
-        - Be concise and practical.
-        - Do NOT hallucinate events.
-        - If no action is required, respond conversationally.
+        Answer the user's message using the provided context.
+        Respond directly with the best possible answer.
+        Do not explain your reasoning.
+        Do not acknowledge instructions.
+        Do not greet the user.
 
         Always respond in plain English.
+        Only output the answer to the user message. Do not say anything else.
 
-        User message:
+        Context:
         {context_text}
 
         User message: {user_message}
 
-        Assistant:
+
+        Answer:
         """
+        print(prompt)
         reply = call_ollama(prompt)
         metadata["retrieved_docs"] = top_docs
+        store_embedding(f"User: {user_message}", doc_type="conversation")
     history.append({"agent": reply})
     conversation_memory[conversation_id] = history
 
     return reply, metadata
-
     history.append({"agent": reply})
     conversation_memory[conversation_id] = history
     return reply, metadata
