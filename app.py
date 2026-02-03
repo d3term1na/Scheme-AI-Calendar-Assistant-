@@ -1,7 +1,8 @@
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
-from memory import conversation_memory
-from tools import create_event, query_event, update_event, delete_event, store_embedding, embed_model, retrieve_top_k, call_ollama, extract_event_details, extract_query_filters, extract_event_identifier, extract_update_details, classify_intent
+from memory import conversation_memory, calendar_events
+from tools import create_event, query_event, update_event, delete_event, store_embedding, embed_model, retrieve_top_k, call_ollama, extract_event_details, extract_query_filters, extract_event_identifier, extract_update_details, extract_notes_details, extract_recurring_details, calculate_recurring_dates, classify_intent
+from datetime import datetime as dt, timedelta
 
 app = FastAPI()
 
@@ -54,23 +55,111 @@ def agent_process(user_message, conversation_id="default"):
         # Format time nicely
         time_str = event['start_time']
         try:
-            from datetime import datetime as dt
             parsed = dt.strptime(time_str, "%Y-%m-%d %H:%M:%S")
             time_str = parsed.strftime("%B %d at %I:%M %p").replace(" 0", " ").lstrip("0")
         except:
             pass
         reply = f"Got it! Scheduled '{event['title']}'{participants_str} for {time_str}."
         metadata["events_created"] = [event]
-        content = f"{event['title']} from {event['start_time']} to {event['end_time']}"
+        # Store richer event info in RAG
+        participants_info = f" with {', '.join(event['participants'])}" if event.get('participants') else ""
+        content = f"Event: {event['title']}{participants_info} scheduled for {event['start_time']}"
         store_embedding(content, doc_type="event")
+    elif intent == "CREATE_RECURRING":
+        details = extract_recurring_details(user_message)
+        print(f"Recurring details: {details}")  # debug
+
+        # Calculate the dates for recurring events
+        dates = calculate_recurring_dates(details)
+
+        if not dates:
+            reply = "I couldn't determine the recurring schedule. Please specify the day and frequency."
+        else:
+            created_events = []
+            time_str = details.get("time", "09:00:00")
+            duration = details.get("duration_minutes", 45)
+
+            for event_date in dates:
+                # Build start and end times
+                start_datetime = f"{event_date.strftime('%Y-%m-%d')} {time_str}"
+                try:
+                    start_dt = dt.strptime(start_datetime, "%Y-%m-%d %H:%M:%S")
+                except:
+                    start_dt = dt.strptime(f"{event_date.strftime('%Y-%m-%d')} 09:00:00", "%Y-%m-%d %H:%M:%S")
+                end_dt = start_dt + timedelta(minutes=duration)
+
+                event = create_event(
+                    title=details["title"],
+                    start_time=start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                    end_time=end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                    participants=details.get("participants", [])
+                )
+                created_events.append(event)
+
+                # Store in RAG
+                participants_info = f" with {', '.join(event['participants'])}" if event.get('participants') else ""
+                content = f"Event: {event['title']}{participants_info} scheduled for {event['start_time']}"
+                store_embedding(content, doc_type="event")
+
+            # Build natural language response
+            num_events = len(created_events)
+            frequency = details.get("frequency", "weekly")
+            day_of_week = details.get("day_of_week", "")
+
+            # Format first date nicely
+            first_date = dates[0]
+            first_date_str = first_date.strftime("%B %d")
+
+            # Format time nicely
+            try:
+                time_parsed = dt.strptime(time_str, "%H:%M:%S")
+                time_formatted = time_parsed.strftime("%I:%M %p").lstrip("0")
+            except:
+                time_formatted = time_str
+
+            if frequency == "weekly" and day_of_week:
+                reply = f"Done! I've scheduled '{details['title']}' for every {day_of_week.capitalize()} at {time_formatted}, starting {first_date_str} ({num_events} events total)."
+            elif frequency == "daily":
+                reply = f"Done! I've scheduled '{details['title']}' daily at {time_formatted}, starting {first_date_str} ({num_events} events total)."
+            else:
+                reply = f"Done! I've created {num_events} recurring '{details['title']}' events starting {first_date_str} at {time_formatted}."
+
+            metadata["events_created"] = created_events
     elif intent == "DELETE":
+        print(f"DELETE - All calendar events: {list(calendar_events.values())}")  # debug
         filters = extract_query_filters(user_message)
+        print(f"DELETE - Extracted filters: {filters}")  # debug
         events = query_event(
             start_date=filters["start_date"],
             end_date=filters["end_date"],
             participants=filters["participants"],
             keyword=filters["keyword"]
         )
+
+        # Fallback: if no events found with keyword, try without keyword
+        if not events and filters["keyword"]:
+            print("DELETE - Trying fallback without keyword filter...")  # debug
+            events = query_event(
+                start_date=filters["start_date"],
+                end_date=filters["end_date"],
+                participants=filters["participants"],
+                keyword=None
+            )
+
+        # Fallback: if still no events, try without date filter
+        if not events and (filters["start_date"] or filters["end_date"]):
+            print("DELETE - Trying fallback without date filter...")  # debug
+            events = query_event(
+                participants=filters["participants"],
+                keyword=filters["keyword"]
+            )
+
+        # Fallback: get all events if still none found
+        if not events:
+            print("DELETE - Trying fallback to get all events...")  # debug
+            events = query_event()
+            print(f"DELETE - Total events in calendar: {len(events)}")  # debug
+
         if events:
             deleted = delete_event(events[0]["event_id"])
             reply = f"Deleted event: {deleted['title']} ({deleted['start_time']})"
@@ -91,35 +180,42 @@ def agent_process(user_message, conversation_id="default"):
         else:
             reply = "No events found matching your criteria."
     elif intent == "UPDATE":
-        from memory import calendar_events
-        print(f"All calendar events: {list(calendar_events.values())}")  # debug
+        print(f"UPDATE - All calendar events: {list(calendar_events.values())}")  # debug
         identifier = extract_event_identifier(user_message)
-        print(f"Update identifier: {identifier}")  # debug
+        print(f"UPDATE - Extracted identifier: {identifier}")  # debug
         events = query_event(
             start_date=identifier["current_date"],
             end_date=identifier["current_date"],
             participants=identifier["participants"],
             keyword=identifier["keyword"]
         )
-        print(f"Events found with filters: {len(events)}")  # debug
 
         # Fallback: if no events found with keyword, try without keyword
         if not events and identifier["keyword"]:
-            print("Trying fallback without keyword filter...")  # debug
+            print("UPDATE - Trying fallback without keyword filter...")  # debug
             events = query_event(
                 start_date=identifier["current_date"],
                 end_date=identifier["current_date"],
                 participants=identifier["participants"],
                 keyword=None
             )
-            print(f"Events found without keyword: {len(events)}")  # debug
+            print(f"UPDATE - Events found without keyword: {len(events)}")  # debug
 
-        # Fallback: if still no events and no date filter, get all events
-        if not events and not identifier["current_date"]:
-            print("Trying fallback to get all events...")  # debug
+        # Fallback: if still no events, try without date filter
+        if not events and identifier["current_date"]:
+            print("UPDATE - Trying fallback without date filter...")  # debug
+            events = query_event(
+                participants=identifier["participants"],
+                keyword=identifier["keyword"]
+            )
+            print(f"UPDATE - Events found without date: {len(events)}")  # debug
+
+        # Fallback: get all events if still none found
+        if not events:
+            print("UPDATE - Trying fallback to get all events...")  # debug
             events = query_event()
-            print(f"Total events in calendar: {len(events)}")  # debug
-            
+            print(f"UPDATE - Total events in calendar: {len(events)}")  # debug
+
         if events:
             event = events[0]
             update_details = extract_update_details(user_message)
@@ -149,7 +245,6 @@ def agent_process(user_message, conversation_id="default"):
                     # Format time nicely (remove seconds if present)
                     time_str = updates['start_time']
                     try:
-                        from datetime import datetime as dt
                         parsed = dt.strptime(time_str, "%Y-%m-%d %H:%M:%S")
                         time_str = parsed.strftime("%B %d at %I:%M %p").replace(" 0", " ").lstrip("0")
                     except:
@@ -169,6 +264,48 @@ def agent_process(user_message, conversation_id="default"):
                 reply = "I couldn't understand what you want to change. Please specify the new time, title, or participants."
         else:
             reply = "No matching events found to update."
+    elif intent == "ADD_NOTES":
+        notes_details = extract_notes_details(user_message)
+        print(f"Notes details: {notes_details}")  # debug
+
+        # Find the event to add notes to
+        events = query_event(
+            start_date=notes_details["event_date"],
+            end_date=notes_details["event_date"],
+            participants=notes_details["participants"],
+            keyword=notes_details["keyword"]
+        )
+
+        # Fallback: try without date filter
+        if not events and notes_details["keyword"]:
+            events = query_event(
+                participants=notes_details["participants"],
+                keyword=notes_details["keyword"]
+            )
+
+        # Fallback: get all events if still none found
+        if not events:
+            events = query_event()
+
+        if events and notes_details["notes"]:
+            event = events[0]
+            # Append to existing notes or create new
+            existing_notes = event.get("notes", "")
+            if existing_notes:
+                new_notes = existing_notes + "\n" + notes_details["notes"]
+            else:
+                new_notes = notes_details["notes"]
+
+            updated = update_event(event["event_id"], notes=new_notes)
+            reply = f"Added notes to '{event['title']}': \"{notes_details['notes']}\""
+            metadata["events_updated"] = [updated]
+            # Store notes in RAG for future questions
+            notes_content = f"Meeting '{event['title']}' on {event['start_time']}: {notes_details['notes']}"
+            store_embedding(notes_content, doc_type="meeting_notes")
+        elif not notes_details["notes"]:
+            reply = "I couldn't understand what notes you want to add. Please try again."
+        else:
+            reply = "No matching events found to add notes to."
     else:  # GENERAL or fallback
         query_vec = embed_model.encode(user_message)
         top_docs = retrieve_top_k(query_vec, k=3)
@@ -192,45 +329,3 @@ def agent_process(user_message, conversation_id="default"):
     conversation_memory[conversation_id] = history
 
     return reply, metadata
-
-    history.append({"agent": reply})
-    conversation_memory[conversation_id] = history
-    return reply, metadata
-    # # Initialize conversation memory if needed
-    # history = conversation_memory.get(conversation_id, [])
-    # history.append({"user": user_message})
-
-    # # 1️⃣ Store embedding for this user message
-    # store_embedding(f"User: {user_message}", doc_type="conversation")
-
-    # # 2️⃣ Retrieve top relevant context
-    # query_vec = embed_model.encode(user_message)
-    # top_docs = retrieve_top_k(query_vec, k=3)
-    # context_text = "\n".join(top_docs) or "No relevant context."
-
-    # # 3️⃣ Build prompt
-    # prompt = f"""
-    # You are a helpful AI calendar assistant.
-    # Use the following context to answer the user's question:
-
-    # Context:
-    # {context_text}
-
-    # User message: {user_message}
-
-    # Provide a concise, helpful, friendly response.
-    # """
-
-    # # 4️⃣ Call Ollama
-    # reply = call_ollama(prompt)
-    # history.append({"agent": reply})
-
-    # conversation_memory[conversation_id] = history
-    # return reply, {"retrieved_docs": top_docs}
-
-# -----------------------------
-# Run server
-# -----------------------------
-# if __name__ == "__main__":
-#     import uvicorn
-#     uvicorn.run(app, host="0.0.0.0", port=5500)

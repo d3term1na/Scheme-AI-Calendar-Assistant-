@@ -6,35 +6,284 @@ import requests
 import json
 import re
 from numpy.linalg import norm
+from zoneinfo import ZoneInfo
 
 # Today's date
 today = datetime.now().strftime("%Y-%m-%d")
 now = datetime.now()
 
-# Embedding model
-embed_model = SentenceTransformer('all-MiniLM-L6-v2')
+# Local timezone (Singapore)
+LOCAL_TZ = ZoneInfo("Asia/Singapore")
 
-# Ollama LLM
+# Ollama LLM config (must be defined before functions that use them)
 OLLAMA_URL = "http://localhost:11434/api/chat"
 MODEL_NAME = "gemma3:4b"
 
+# Embedding model
+embed_model = SentenceTransformer('all-MiniLM-L6-v2')
+
+
+def extract_timezone_from_message(user_message):
+    """Use LLM to detect if a timezone is mentioned in the user message."""
+    extraction_prompt = f"""Analyze this message and determine if a timezone is mentioned.
+
+Common timezone abbreviations and their IANA names:
+- PST/PDT/Pacific -> America/Los_Angeles
+- EST/EDT/Eastern -> America/New_York
+- CST/CDT/Central -> America/Chicago
+- MST/MDT/Mountain -> America/Denver
+- GMT/UTC -> UTC
+- BST/London -> Europe/London
+- CET/Paris/Berlin -> Europe/Paris
+- IST/India -> Asia/Kolkata
+- JST/Tokyo -> Asia/Tokyo
+- SGT/Singapore -> Asia/Singapore
+- AEST/Sydney -> Australia/Sydney
+- HKT/Hong Kong -> Asia/Hong_Kong
+- KST/Seoul -> Asia/Seoul
+- CST (China) -> Asia/Shanghai
+
+If a timezone IS mentioned, return the IANA timezone name (e.g., "America/Los_Angeles").
+If NO timezone is mentioned, return "null".
+
+Message: {user_message}
+
+Return ONLY the IANA timezone name or "null" (no quotes, no explanation):"""
+
+    payload = {
+        "model": MODEL_NAME,
+        "messages": [
+            {"role": "system", "content": "You detect timezones in messages. Return only the IANA timezone name or null."},
+            {"role": "user", "content": extraction_prompt}
+        ],
+        "stream": False
+    }
+
+    try:
+        res = requests.post(OLLAMA_URL, json=payload, timeout=30)
+        res.raise_for_status()
+        raw_response = res.json()["message"]["content"].strip()
+        print(f"Timezone detection raw response: '{raw_response}'")  # debug
+
+        # Clean up response (keep case for ZoneInfo validation)
+        response = raw_response.replace('"', '').replace("'", "").strip()
+        response_lower = response.lower()
+        print(f"Timezone detection cleaned response: '{response}'")  # debug
+
+        if response_lower == "null" or response_lower == "none" or not response:
+            print("No timezone detected")  # debug
+            return None
+
+        # Validate it's a real timezone (try original case first)
+        try:
+            ZoneInfo(response)
+            print(f"Valid IANA timezone found: {response}")  # debug
+            return response
+        except:
+            pass
+
+        # Try common IANA formats with proper casing
+        iana_formats = {
+            "america/los_angeles": "America/Los_Angeles",
+            "america/new_york": "America/New_York",
+            "america/chicago": "America/Chicago",
+            "america/denver": "America/Denver",
+            "europe/london": "Europe/London",
+            "europe/paris": "Europe/Paris",
+            "asia/tokyo": "Asia/Tokyo",
+            "asia/singapore": "Asia/Singapore",
+            "asia/hong_kong": "Asia/Hong_Kong",
+            "asia/kolkata": "Asia/Kolkata",
+            "asia/shanghai": "Asia/Shanghai",
+            "asia/seoul": "Asia/Seoul",
+            "australia/sydney": "Australia/Sydney",
+        }
+        if response_lower in iana_formats:
+            tz = iana_formats[response_lower]
+            print(f"Matched IANA timezone: {tz}")  # debug
+            return tz
+
+        # Try to match common abbreviations
+        tz_mapping = {
+            "pst": "America/Los_Angeles",
+            "pdt": "America/Los_Angeles",
+            "pacific": "America/Los_Angeles",
+            "est": "America/New_York",
+            "edt": "America/New_York",
+            "eastern": "America/New_York",
+            "cst": "America/Chicago",
+            "cdt": "America/Chicago",
+            "central": "America/Chicago",
+            "mst": "America/Denver",
+            "mdt": "America/Denver",
+            "mountain": "America/Denver",
+            "gmt": "UTC",
+            "utc": "UTC",
+            "bst": "Europe/London",
+            "london": "Europe/London",
+            "jst": "Asia/Tokyo",
+            "tokyo": "Asia/Tokyo",
+            "sgt": "Asia/Singapore",
+            "singapore": "Asia/Singapore",
+            "hkt": "Asia/Hong_Kong",
+            "ist": "Asia/Kolkata",
+            "aest": "Australia/Sydney",
+        }
+        for key, tz in tz_mapping.items():
+            if key in response_lower:
+                print(f"Matched timezone abbreviation '{key}' -> {tz}")  # debug
+                return tz
+
+        print(f"Could not match timezone: {response}")  # debug
+        return None
+    except Exception as e:
+        print(f"Timezone extraction error: {e}")
+        return None
+
+
+def convert_to_local_tz(datetime_str, source_tz_name):
+    """Convert a datetime string from source timezone to local timezone (SGT)."""
+    if not datetime_str or not source_tz_name:
+        return datetime_str
+
+    try:
+        print(f"Converting: {datetime_str} from {source_tz_name} to SGT")  # debug
+        # Parse the datetime
+        dt = datetime.strptime(datetime_str, "%Y-%m-%d %H:%M:%S")
+
+        # Attach the source timezone
+        source_tz = ZoneInfo(source_tz_name)
+        dt_with_tz = dt.replace(tzinfo=source_tz)
+
+        # Convert to local timezone
+        dt_local = dt_with_tz.astimezone(LOCAL_TZ)
+
+        result = dt_local.strftime("%Y-%m-%d %H:%M:%S")
+        print(f"Converted result: {result}")  # debug
+        # Return as string without timezone info (for storage)
+        return result
+    except Exception as e:
+        print(f"Timezone conversion error: {e}")
+        return datetime_str
+
+
+def convert_time_to_local_tz(time_str, source_tz_name):
+    """Convert a time string (HH:MM:SS) from source timezone to local timezone (SGT)."""
+    if not time_str or not source_tz_name:
+        return time_str
+
+    try:
+        # Create a datetime using today's date + the time
+        today_date = datetime.now().strftime("%Y-%m-%d")
+        full_datetime = f"{today_date} {time_str}"
+
+        # Convert using the full datetime function
+        converted = convert_to_local_tz(full_datetime, source_tz_name)
+
+        # Extract just the time portion
+        return converted.split(" ")[1] if converted else time_str
+    except Exception as e:
+        print(f"Time timezone conversion error: {e}")
+        return time_str
+
+
+def normalize_datetime(datetime_str, original_message=None):
+    """
+    Normalize a datetime string to YYYY-MM-DD HH:MM:SS format.
+    Handles relative dates like 'tomorrow', 'next week', etc.
+    If original_message is provided, check it for day names to override extracted date.
+    """
+    if not datetime_str:
+        return None
+
+    datetime_str = datetime_str.strip()
+    current = datetime.now()
+
+    # Try to extract time portion if present
+    time_match = re.search(r'(\d{1,2}:\d{2}(?::\d{2})?)', datetime_str)
+    time_str = time_match.group(1) if time_match else "09:00:00"
+    if len(time_str) == 5:  # HH:MM format
+        time_str += ":00"
+
+    # Check the original message for day names (more reliable than LLM extraction)
+    check_str = (original_message or datetime_str).lower()
+    target_date = None
+
+    # Day name map
+    day_map = {
+        "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+        "friday": 4, "saturday": 5, "sunday": 6
+    }
+
+    # Handle relative date keywords
+    if "tomorrow" in check_str:
+        target_date = current.date() + timedelta(days=1)
+    elif "today" in check_str and "not today" not in check_str:
+        target_date = current.date()
+    elif "next week" in check_str:
+        target_date = current.date() + timedelta(weeks=1)
+    elif "next month" in check_str:
+        target_date = current.date() + timedelta(days=30)
+    else:
+        # Check for day names
+        for day_name, day_num in day_map.items():
+            if day_name in check_str:
+                days_ahead = day_num - current.weekday()
+                if days_ahead <= 0:
+                    days_ahead += 7
+                target_date = current.date() + timedelta(days=days_ahead)
+                break
+
+    if target_date:
+        return f"{target_date.strftime('%Y-%m-%d')} {time_str}"
+
+    # If already in correct format and no day name found, return as-is
+    try:
+        datetime.strptime(datetime_str, "%Y-%m-%d %H:%M:%S")
+        return datetime_str
+    except ValueError:
+        pass
+
+    # Couldn't normalize - return None to indicate failure
+    print(f"Warning: Could not normalize datetime: {datetime_str}")
+    return None
+
+
+# Answers context questions
 def call_ollama(user_message, context=""):
-    context_section = f"Context:\n{context}\n\n" if context else ""
+
+    # Context
+    context_section = f"Context from your calendar and meeting notes:\n{context}\n\n" if context else ""
+
+    # Prompt
+    context_prompt = f"""You are an AI calendar assistant. Today's date is {today}.
+
+When answering questions:
+- Use the provided context from calendar events and meeting notes to answer questions
+- If the context contains relevant meeting notes, reference which meeting the information is from
+- If asked about decisions, discussions, or action items, look for them in the meeting notes
+- Be concise but informative
+- If the context doesn't contain relevant information, say so honestly"""
+
+    # LLM
     payload = {"model": MODEL_NAME,
                "messages": [
                     {
                         "role": "system",
-                        "content": f"You are an AI calendar assistant. Only answer the user query. Today's date is {today}. Interpret phrases like 'this week', 'next week', and 'tomorrow' relative to today."
+                        "content": context_prompt
                     },
                     {
                         "role": "user",
-                        "content": f"{context_section}User query: {user_message}"
+                        "content": f"{context_section}User question: {user_message}"
                     }
                 ],
                 "stream": False}
     try:
+        # Asking LLM
         res = requests.post(OLLAMA_URL, json=payload, timeout=60)
         res.raise_for_status()
+
+        # LLM's response
         data = res.json()
         return data["message"]["content"]
     except Exception as e:
@@ -46,26 +295,31 @@ def classify_intent(user_message):
     """Use LLM to classify user intent semantically."""
     classification_prompt = f"""Classify the user's intent into exactly ONE of these categories:
 
-- CREATE: User wants to schedule, add, or create a new event/meeting/appointment
+- CREATE_RECURRING: User wants to create RECURRING/REPEATED events (every week, every day, weekly, daily, "for the next X weeks")
+- CREATE: User wants to schedule a SINGLE one-time event/meeting/appointment
 - DELETE: User wants to remove, cancel, or delete an existing event
-- QUERY: User wants to see, list, check, or ask about their events/calendar
-- UPDATE: User wants to change, modify, reschedule, or update an existing event
-- GENERAL: Greetings, help requests, or questions not about specific calendar operations
+- QUERY: User wants to see their SCHEDULE - list events, check availability, see what's on calendar (NOT asking about meeting content)
+- UPDATE: User wants to change, modify, reschedule, or update an existing event (time, title, participants)
+- ADD_NOTES: User wants to add notes, comments, or a summary to an existing event (STATEMENTS like "We discussed X", "The meeting covered Y")
+- GENERAL: Questions about meeting CONTENT/DISCUSSIONS (like "What did we discuss?", "What was decided?", "How much was X increased?")
 
 Important:
+- "every Friday", "weekly", "every week", "daily", "for the next 4 weeks" = CREATE_RECURRING (not CREATE)
+- "schedule a meeting tomorrow" = CREATE (single event, no recurrence)
 - "Don't delete" or "I don't want to remove" = NOT delete intent
-- "Can you help me create..." = CREATE intent
 - "What's on my calendar?" or "Am I free tomorrow?" = QUERY intent
 - "Move my meeting to..." or "Change the time of..." = UPDATE intent
+- "Add notes to my meeting..." or "We discussed X" (STATEMENT) = ADD_NOTES intent
+- "What did we discuss?" (QUESTION about past meetings) = GENERAL intent
 
 Message: {user_message}
 
-Respond with ONLY the category name (CREATE, DELETE, QUERY, UPDATE, or GENERAL):"""
-    
+Respond with ONLY the category name (CREATE_RECURRING, CREATE, DELETE, QUERY, UPDATE, ADD_NOTES, or GENERAL):"""
+
     payload = {
         "model": MODEL_NAME,
         "messages": [
-            {"role": "system", "content": "You classify user intents. Respond with only one word: CREATE, DELETE, QUERY, UPDATE, or GENERAL."},
+            {"role": "system", "content": "You classify user intents. Respond with only one word: CREATE_RECURRING, CREATE, DELETE, QUERY, UPDATE, ADD_NOTES, or GENERAL."},
             {"role": "user", "content": classification_prompt}
         ],
         "stream": False
@@ -77,7 +331,8 @@ Respond with ONLY the category name (CREATE, DELETE, QUERY, UPDATE, or GENERAL):
         response = res.json()["message"]["content"].strip().upper()
 
         # Extract just the intent keyword if there's extra text
-        for intent in ["CREATE", "DELETE", "QUERY", "UPDATE", "GENERAL"]:
+        # Check CREATE_RECURRING before CREATE to avoid partial match
+        for intent in ["CREATE_RECURRING", "CREATE", "DELETE", "QUERY", "UPDATE", "ADD_NOTES", "GENERAL"]:
             if intent in response:
                 return intent
 
@@ -86,9 +341,10 @@ Respond with ONLY the category name (CREATE, DELETE, QUERY, UPDATE, or GENERAL):
         print("Intent classification error:", e)
         return "GENERAL"
 
-
+# Extracts event details from natural language into JSON format using LLM
 def extract_event_details(user_message):
-    """Use LLM to extract event details from natural language."""
+
+    # Prompt to feed
     extraction_prompt = f"""Extract event details from this message. Today is {today} (current time: {now.strftime("%H:%M")}).
 
 Return ONLY valid JSON with these fields:
@@ -104,6 +360,7 @@ Message: {user_message}
 
 JSON:"""
 
+    # LLM
     payload = {
         "model": MODEL_NAME,
         "messages": [
@@ -114,8 +371,11 @@ JSON:"""
     }
 
     try:
+        # Asking LLM
         res = requests.post(OLLAMA_URL, json=payload, timeout=60)
         res.raise_for_status()
+
+        # LLM's response
         response_text = res.json()["message"]["content"]
 
         # Extract JSON from response (handle markdown code blocks)
@@ -129,10 +389,42 @@ JSON:"""
         if not all(k in details for k in ["title", "start_time", "end_time"]):
             raise ValueError("Missing required fields")
 
+        # Normalize datetime values
+        start_time = normalize_datetime(details["start_time"])
+        end_time = normalize_datetime(details["end_time"])
+
+        # If normalization failed, use defaults
+        if not start_time:
+            default_start = now.replace(hour=9, minute=0, second=0, microsecond=0)
+            if default_start < now:
+                default_start += timedelta(days=1)
+            start_time = default_start.strftime("%Y-%m-%d %H:%M:%S")
+
+        if not end_time:
+            try:
+                start_dt = datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S")
+                end_time = (start_dt + timedelta(minutes=45)).strftime("%Y-%m-%d %H:%M:%S")
+            except:
+                end_time = start_time
+
+        # Check for timezone in user message and convert to local (SGT)
+        print(f"About to check timezone in: {user_message}")  # debug
+        source_tz = extract_timezone_from_message(user_message)
+        print(f"Timezone extraction result: {source_tz}")  # debug
+        if source_tz:
+            print(f"Detected timezone: {source_tz}, converting to SGT")
+            print(f"Before conversion - start: {start_time}, end: {end_time}")  # debug
+            start_time = convert_to_local_tz(start_time, source_tz)
+            end_time = convert_to_local_tz(end_time, source_tz)
+            print(f"After conversion - start: {start_time}, end: {end_time}")  # debug
+
+        details["start_time"] = start_time
+        details["end_time"] = end_time
+
         return details
     except Exception as e:
         print("Extraction error:", e)
-        # Fallback: use message as title with default times
+        # Fallback: use message as title with default time 9:00am
         default_start = now.replace(hour=9, minute=0, second=0, microsecond=0)
         if default_start < now:
             default_start += timedelta(days=1)
@@ -301,10 +593,38 @@ JSON:"""
             response_text = json_match.group(1)
 
         details = json.loads(response_text.strip())
+
+        # Normalize datetime values to ensure proper format
+        # Pass the original user_message so day names like "Saturday" can be detected
+        new_start = details.get("new_start_time")
+        new_end = details.get("new_end_time")
+
+        if new_start:
+            new_start = normalize_datetime(new_start, user_message)
+        if new_end:
+            new_end = normalize_datetime(new_end, user_message)
+
+        # If we have start but no end, calculate end as 45 min later
+        if new_start and not new_end:
+            try:
+                start_dt = datetime.strptime(new_start, "%Y-%m-%d %H:%M:%S")
+                end_dt = start_dt + timedelta(minutes=45)
+                new_end = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+            except:
+                pass
+
+        # Check for timezone in user message and convert to local (SGT)
+        source_tz = extract_timezone_from_message(user_message)
+        if source_tz and new_start:
+            print(f"Detected timezone: {source_tz}, converting to SGT")
+            new_start = convert_to_local_tz(new_start, source_tz)
+            if new_end:
+                new_end = convert_to_local_tz(new_end, source_tz)
+
         return {
             "new_title": details.get("new_title"),
-            "new_start_time": details.get("new_start_time"),
-            "new_end_time": details.get("new_end_time"),
+            "new_start_time": new_start,
+            "new_end_time": new_end,
             "new_participants": details.get("new_participants"),
             "add_participants": details.get("add_participants"),
             "remove_participants": details.get("remove_participants")
@@ -317,6 +637,248 @@ JSON:"""
         }
 
 
+def extract_notes_details(user_message):
+    """Use LLM to extract which event to add notes to and what the notes are."""
+    extraction_prompt = f"""Extract note details from this message. Today is {today}.
+
+The user wants to ADD NOTES to an existing event. Extract:
+1. Which event they're referring to (keyword, participants, date)
+2. The actual notes/content to add
+
+Return ONLY valid JSON with these fields:
+- keyword: string or null (event type/title to search for, e.g., "meeting", "standup")
+- participants: array of strings or null (people in the event)
+- event_date: string in "YYYY-MM-DD" format or null (when the event was/is)
+- notes: string (the actual notes content to add - extract the meaningful content)
+
+Examples:
+- "Add notes to my meeting with Bob yesterday: we discussed the Q1 budget" -> {{"keyword": "meeting", "participants": ["Bob"], "event_date": "yesterday's date", "notes": "Discussed the Q1 budget"}}
+- "The standup this morning covered sprint progress" -> {{"keyword": "standup", "participants": null, "event_date": "{today}", "notes": "Covered sprint progress"}}
+- "Notes for yesterday's team meeting: action items - finish design doc, review PRs" -> {{"keyword": "team meeting", "participants": null, "event_date": "yesterday's date", "notes": "Action items: finish design doc, review PRs"}}
+
+Message: {user_message}
+
+JSON:"""
+
+    payload = {
+        "model": MODEL_NAME,
+        "messages": [
+            {"role": "system", "content": "You extract event notes details and return only valid JSON. No explanations."},
+            {"role": "user", "content": extraction_prompt}
+        ],
+        "stream": False
+    }
+
+    try:
+        res = requests.post(OLLAMA_URL, json=payload, timeout=60)
+        res.raise_for_status()
+        response_text = res.json()["message"]["content"]
+
+        json_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', response_text)
+        if json_match:
+            response_text = json_match.group(1)
+
+        details = json.loads(response_text.strip())
+        return {
+            "keyword": details.get("keyword"),
+            "participants": details.get("participants"),
+            "event_date": details.get("event_date"),
+            "notes": details.get("notes", "")
+        }
+    except Exception as e:
+        print("Notes extraction error:", e)
+        return {"keyword": None, "participants": None, "event_date": None, "notes": ""}
+
+
+def extract_recurring_details(user_message):
+    """Use LLM to extract recurring event details from natural language."""
+    extraction_prompt = f"""Extract recurring event details from this message. Today is {today} ({datetime.now().strftime("%A")}).
+
+The user wants to create RECURRING events. Extract:
+1. Event details (title, time, participants)
+2. Recurrence pattern (which day, frequency)
+3. Limit (how many occurrences or end date)
+
+Return ONLY valid JSON with these fields:
+- title: string (the event name/description)
+- time: string in "HH:MM:SS" format (the time of day for the event)
+- duration_minutes: integer (duration in minutes, default 45)
+- participants: array of strings (names mentioned, empty array if none)
+- frequency: string - "weekly" or "daily" (default "weekly")
+- day_of_week: string or null (for weekly: "monday", "tuesday", etc. - extract from message or use today's day)
+- occurrence_limit: integer or null (number of events to create, e.g., "3 meetings" = 3)
+- end_date: string in "YYYY-MM-DD" format or null (e.g., "till March" or "this month")
+
+IMPORTANT:
+- If no limit specified, use occurrence_limit: 4 (default)
+- "every Friday at 5pm" -> day_of_week: "friday", time: "17:00:00"
+- "daily standup at 9am" -> frequency: "daily", time: "09:00:00"
+- "for the next 3 weeks" -> occurrence_limit: 3
+- For end_date, ALWAYS use YYYY-MM-DD format or use these EXACT keywords: "end_of_month", "end_of_year"
+- "till March" or "until March" -> end_date: "2026-03-01" (first day of that month)
+- "this month" or "end of month" -> end_date: "end_of_month" (special keyword)
+
+Examples:
+- "Set a progress meeting for every friday 5pm" -> {{"title": "Progress Meeting", "time": "17:00:00", "duration_minutes": 45, "participants": [], "frequency": "weekly", "day_of_week": "friday", "occurrence_limit": 4, "end_date": null}}
+- "Weekly standup with the team every Monday 9am for 3 weeks" -> {{"title": "Weekly Standup", "time": "09:00:00", "duration_minutes": 45, "participants": [], "frequency": "weekly", "day_of_week": "monday", "occurrence_limit": 3, "end_date": null}}
+- "Daily check-in at 10am till end of month" -> {{"title": "Daily Check-in", "time": "10:00:00", "duration_minutes": 45, "participants": [], "frequency": "daily", "day_of_week": null, "occurrence_limit": null, "end_date": "end_of_month"}}
+
+Message: {user_message}
+
+JSON:"""
+
+    payload = {
+        "model": MODEL_NAME,
+        "messages": [
+            {"role": "system", "content": "You extract recurring event details and return only valid JSON. No explanations."},
+            {"role": "user", "content": extraction_prompt}
+        ],
+        "stream": False
+    }
+
+    try:
+        res = requests.post(OLLAMA_URL, json=payload, timeout=60)
+        res.raise_for_status()
+        response_text = res.json()["message"]["content"]
+
+        json_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', response_text)
+        if json_match:
+            response_text = json_match.group(1)
+
+        details = json.loads(response_text.strip())
+
+        # Get time value
+        time_value = details.get("time") or "09:00:00"
+
+        # Check for timezone in user message and convert to local (SGT)
+        source_tz = extract_timezone_from_message(user_message)
+        if source_tz:
+            print(f"Detected timezone: {source_tz}, converting time to SGT")
+            time_value = convert_time_to_local_tz(time_value, source_tz)
+
+        # Use 'or' to handle None values from LLM returning null
+        return {
+            "title": details.get("title") or "Recurring Event",
+            "time": time_value,
+            "duration_minutes": details.get("duration_minutes") or 45,
+            "participants": details.get("participants") or [],
+            "frequency": details.get("frequency") or "weekly",
+            "day_of_week": details.get("day_of_week"),
+            "occurrence_limit": details.get("occurrence_limit") or 4,  # Default to 4 if null/None
+            "end_date": details.get("end_date")
+        }
+    except Exception as e:
+        print("Recurring extraction error:", e)
+        return {
+            "title": "Recurring Event",
+            "time": "09:00:00",
+            "duration_minutes": 45,
+            "participants": [],
+            "frequency": "weekly",
+            "day_of_week": None,
+            "occurrence_limit": 4,
+            "end_date": None
+        }
+
+
+def calculate_recurring_dates(details):
+    """Calculate the dates for recurring events based on the extracted details."""
+    dates = []
+
+    frequency = details.get("frequency") or "weekly"
+    day_of_week = details.get("day_of_week")
+    occurrence_limit = details.get("occurrence_limit") or 4  # Default to 4 events
+    end_date_str = details.get("end_date")
+
+    # Parse end_date if provided
+    end_date = None
+    if end_date_str:
+        end_date_lower = end_date_str.lower().strip()
+        # Handle special keywords
+        if "end_of_month" in end_date_lower or "end of month" in end_date_lower or "this month" in end_date_lower:
+            # Calculate last day of current month
+            current = datetime.now()
+            if current.month == 12:
+                end_date = current.replace(year=current.year + 1, month=1, day=1).date() - timedelta(days=1)
+            else:
+                end_date = current.replace(month=current.month + 1, day=1).date() - timedelta(days=1)
+        elif "end_of_year" in end_date_lower or "end of year" in end_date_lower:
+            # Calculate last day of current year
+            end_date = datetime(datetime.now().year, 12, 31).date()
+        else:
+            # Try to parse as YYYY-MM-DD
+            try:
+                end_date = datetime.strptime(end_date_str, "%Y-%m-%d").date()
+            except:
+                # Try other common formats
+                for fmt in ["%Y/%m/%d", "%m/%d/%Y", "%d-%m-%Y"]:
+                    try:
+                        end_date = datetime.strptime(end_date_str, fmt).date()
+                        break
+                    except:
+                        pass
+
+    # Map day names to weekday numbers (0=Monday, 6=Sunday)
+    day_map = {
+        "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+        "friday": 4, "saturday": 5, "sunday": 6
+    }
+
+    current_date = datetime.now().date()
+
+    if frequency == "weekly" and day_of_week:
+        # Find the target weekday
+        target_day = day_map.get(day_of_week.lower(), current_date.weekday())
+
+        # Find the next occurrence of that day
+        days_ahead = target_day - current_date.weekday()
+        if days_ahead <= 0:  # Target day already happened this week
+            days_ahead += 7
+        next_date = current_date + timedelta(days=days_ahead)
+
+        # Generate dates
+        count = 0
+        max_iterations = occurrence_limit  # Already defaults to 4
+
+        while count < max_iterations:
+            if end_date and next_date > end_date:
+                break
+            dates.append(next_date)
+            count += 1
+            next_date += timedelta(weeks=1)
+
+    elif frequency == "daily":
+        # Start from tomorrow for daily events
+        next_date = current_date + timedelta(days=1)
+
+        count = 0
+        max_iterations = occurrence_limit  # Already defaults to 4
+
+        while count < max_iterations:
+            if end_date and next_date > end_date:
+                break
+            dates.append(next_date)
+            count += 1
+            next_date += timedelta(days=1)
+    else:
+        # Default: weekly starting from today's day of week, next week
+        next_date = current_date + timedelta(weeks=1)
+        count = 0
+        max_iterations = occurrence_limit  # Already defaults to 4
+
+        while count < max_iterations:
+            if end_date and next_date > end_date:
+                break
+            dates.append(next_date)
+            count += 1
+            next_date += timedelta(weeks=1)
+
+    return dates
+
+# -----------------------------
+# RAG
+# -----------------------------
+# Vectorisation
 def store_embedding(content, doc_type="conversation"):
     """Store embedding in the in-memory dictionary"""
     global next_id
@@ -325,6 +887,7 @@ def store_embedding(content, doc_type="conversation"):
     next_id += 1
     return next_id - 1
 
+# Compare and rank vectors
 def retrieve_top_k(query_vector, k=3):
     """Retrieve top-k most similar embeddings"""
 
@@ -333,10 +896,13 @@ def retrieve_top_k(query_vector, k=3):
     scored.sort(key=lambda x: x[1], reverse=True)
     return [embeddings[doc]["content"] for doc, score in scored[:k]]
 
+# Similarity score
 def cosine_similarity(a, b):
         return np.dot(a, b) / (norm(a) * norm(b))
 
-
+# -----------------------------
+# Calendar event CRUD functions
+# -----------------------------
 def create_event(title, start_time, end_time, participants = None, notes=""):
     global event_count
     calendar_events[event_count] = {
@@ -350,7 +916,6 @@ def create_event(title, start_time, end_time, participants = None, notes=""):
     event = calendar_events[event_count]
     event_count += 1
     return event
-
     
 def update_event(event_id, **updates):
     if event_id in calendar_events:
@@ -376,16 +941,31 @@ def query_event(start_date=None, end_date=None, participants=None, keyword=None)
         match = True
         match_score = 0  # Higher score = better match
 
-        # Check date range
-        event_date = datetime.fromisoformat(event["start_time"]).date()
-        if start_date:
-            start_dt = datetime.fromisoformat(start_date).date()
-            if event_date < start_dt:
-                match = False
-        if end_date:
-            end_dt = datetime.fromisoformat(end_date).date()
-            if event_date > end_dt:
-                match = False
+        # Check date range - handle invalid date formats gracefully
+        try:
+            event_date = datetime.fromisoformat(event["start_time"]).date()
+        except (ValueError, TypeError):
+            # Try parsing with strptime as fallback
+            try:
+                event_date = datetime.strptime(event["start_time"], "%Y-%m-%d %H:%M:%S").date()
+            except (ValueError, TypeError):
+                # Skip date filtering for events with invalid dates
+                print(f"Warning: Event '{event.get('title')}' has invalid date format: {event.get('start_time')}")
+                event_date = None
+        if start_date and event_date:
+            try:
+                start_dt = datetime.fromisoformat(start_date).date()
+                if event_date < start_dt:
+                    match = False
+            except (ValueError, TypeError):
+                pass  # Skip date filter if invalid
+        if end_date and event_date:
+            try:
+                end_dt = datetime.fromisoformat(end_date).date()
+                if event_date > end_dt:
+                    match = False
+            except (ValueError, TypeError):
+                pass  # Skip date filter if invalid
 
         # Check participants
         if participants:
