@@ -9,7 +9,7 @@ body {
     font-family: 'Segoe UI', Arial, sans-serif;
     height: 100vh;
     display: grid;
-    grid-template-columns: 350px 1fr;
+    grid-template-columns: 450px 1fr;
     grid-template-rows: auto 1fr;
     background: #f5f5f5;
 }
@@ -87,18 +87,35 @@ body {
     gap: 10px;
     background: #fff;
     border-top: 1px solid #eee;
+    align-items: flex-end;
+}
+
+.input-wrapper {
+    flex: 1;
+    position: relative;
 }
 
 #message {
-    flex: 1;
+    width: 100%;
     padding: 12px;
     border: 1px solid #ddd;
     border-radius: 8px;
     font-size: 0.95em;
     outline: none;
+    font-family: inherit;
+    resize: none;
+    min-height: 44px;
+    max-height: 150px;
+    overflow-y: auto;
+    line-height: 1.4;
 }
 
 #message:focus { border-color: #4a90d9; }
+
+#message::placeholder {
+    color: #999;
+    font-style: italic;
+}
 
 #send {
     padding: 12px 20px;
@@ -313,7 +330,9 @@ body {
         <div id="chat"></div>
         <div id="suggestionContainer"></div>
         <div id="inputArea">
-            <input type="text" id="message" placeholder="Type a message..." />
+            <div class="input-wrapper">
+                <textarea id="message" rows="1" placeholder="Type a message..."></textarea>
+            </div>
             <button id="send">Send</button>
         </div>
     </div>
@@ -420,6 +439,11 @@ sendButton.onclick = async () => {
                 });
                 renderCalendar();
             }
+
+            // Refresh scheduling insight after any calendar changes
+            if (data.metadata.events_created || data.metadata.events_updated || data.metadata.events_deleted) {
+                fetchSchedulingInsight();
+            }
         }
     } catch (err) {
         loadingBubble.textContent = "Error: could not reach backend";
@@ -427,12 +451,27 @@ sendButton.onclick = async () => {
     } finally {
         sendButton.disabled = false;
         chat.scrollTop = chat.scrollHeight;
+        // Reset textarea height after sending
+        messageInput.style.height = 'auto';
     }
 };
 
+// Auto-expand textarea as user types
+function autoExpandTextarea() {
+    messageInput.style.height = 'auto';
+    messageInput.style.height = Math.min(messageInput.scrollHeight, 150) + 'px';
+}
+
+messageInput.addEventListener('input', autoExpandTextarea);
+
+// Handle Enter key (Enter to send, Shift+Enter for new line)
 messageInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !sendButton.disabled) sendButton.click();
+    if (e.key === 'Enter' && !e.shiftKey && !sendButton.disabled) {
+        e.preventDefault();
+        sendButton.click();
+    }
 });
+
 
 // Calendar functionality
 function addEventToCalendar(event) {
@@ -623,6 +662,21 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
+// Fetch scheduling insight for placeholder
+async function fetchSchedulingInsight() {
+    try {
+        const res = await fetch('/scheduling-insight');
+        if (res.ok) {
+            const data = await res.json();
+            if (data.insight) {
+                messageInput.placeholder = data.insight;
+            }
+        }
+    } catch (err) {
+        console.error('Error fetching scheduling insight:', err);
+    }
+}
+
 // Fetch events and suggestions on page load
 async function initializeApp() {
     try {
@@ -645,6 +699,9 @@ async function initializeApp() {
 
     // Fetch agenda suggestions
     fetchAgendaSuggestions();
+
+    // Fetch scheduling insight for placeholder
+    fetchSchedulingInsight();
 }
 
 // Initial render and data load

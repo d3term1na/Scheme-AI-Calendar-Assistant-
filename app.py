@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from memory import conversation_memory, calendar_events
-from tools import create_event, query_event, update_event, delete_event, store_embedding, embed_model, retrieve_top_k, call_ollama, extract_event_details, extract_query_filters, extract_event_identifier, extract_update_details, extract_notes_details, extract_recurring_details, calculate_recurring_dates, classify_intent, get_upcoming_recurring_meetings
+from tools import create_event, query_event, update_event, delete_event, store_embedding, embed_model, retrieve_top_k, call_ollama, extract_event_details, extract_query_filters, extract_event_identifier, extract_update_details, extract_notes_details, extract_recurring_details, calculate_recurring_dates, classify_intent, get_upcoming_recurring_meetings, get_scheduling_insight
 from datetime import datetime as dt, timedelta
 
 app = FastAPI()
@@ -33,6 +33,13 @@ async def get_agenda_suggestions():
 async def get_all_events():
     """Get all calendar events for initial page load."""
     return {"events": list(calendar_events.values())}
+
+
+@app.get("/scheduling-insight")
+async def get_insight():
+    """Get a contextual scheduling insight based on user's calendar patterns."""
+    insight = get_scheduling_insight()
+    return {"insight": insight}
 
 
 # -----------------------------
