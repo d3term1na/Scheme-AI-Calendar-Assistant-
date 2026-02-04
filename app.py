@@ -1,10 +1,38 @@
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from memory import conversation_memory, calendar_events
-from tools import create_event, query_event, update_event, delete_event, store_embedding, embed_model, retrieve_top_k, call_ollama, extract_event_details, extract_query_filters, extract_event_identifier, extract_update_details, extract_notes_details, extract_recurring_details, calculate_recurring_dates, classify_intent
+from tools import create_event, query_event, update_event, delete_event, store_embedding, embed_model, retrieve_top_k, call_ollama, extract_event_details, extract_query_filters, extract_event_identifier, extract_update_details, extract_notes_details, extract_recurring_details, calculate_recurring_dates, classify_intent, get_upcoming_recurring_meetings
 from datetime import datetime as dt, timedelta
 
 app = FastAPI()
+
+# -----------------------------
+# Agenda Suggestions Endpoint
+# -----------------------------
+@app.get("/agenda-suggestions")
+async def get_agenda_suggestions():
+    """Get agenda suggestions for upcoming recurring meetings based on past notes."""
+    suggestions = get_upcoming_recurring_meetings()
+
+    # Format for frontend consumption
+    formatted = []
+    for item in suggestions:
+        formatted.append({
+            "event_id": item["upcoming_event"]["event_id"],
+            "event_title": item["upcoming_event"]["title"],
+            "event_time": item["upcoming_event"]["start_time"],
+            "last_meeting_date": item["last_occurrence"]["start_time"],
+            "suggested_agenda": item["suggested_agenda"],
+            "recurrence_group": item["upcoming_event"].get("recurrence_group")
+        })
+
+    return {"suggestions": formatted}
+
+
+@app.get("/events")
+async def get_all_events():
+    """Get all calendar events for initial page load."""
+    return {"events": list(calendar_events.values())}
 
 
 # -----------------------------
@@ -79,6 +107,10 @@ def agent_process(user_message, conversation_id="default"):
             time_str = details.get("time", "09:00:00")
             duration = details.get("duration_minutes", 45)
 
+            # Generate a unique recurrence_group ID for this series
+            import uuid
+            recurrence_group = str(uuid.uuid4())[:8]
+
             for event_date in dates:
                 # Build start and end times
                 start_datetime = f"{event_date.strftime('%Y-%m-%d')} {time_str}"
@@ -92,7 +124,8 @@ def agent_process(user_message, conversation_id="default"):
                     title=details["title"],
                     start_time=start_dt.strftime("%Y-%m-%d %H:%M:%S"),
                     end_time=end_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                    participants=details.get("participants", [])
+                    participants=details.get("participants", []),
+                    recurrence_group=recurrence_group
                 )
                 created_events.append(event)
 
@@ -266,7 +299,8 @@ def agent_process(user_message, conversation_id="default"):
             reply = "No matching events found to update."
     elif intent == "ADD_NOTES":
         notes_details = extract_notes_details(user_message)
-        print(f"Notes details: {notes_details}")  # debug
+        print(f"ADD_NOTES - Notes details: {notes_details}")  # debug
+        print(f"ADD_NOTES - Searching for event_date: {notes_details['event_date']}, keyword: {notes_details['keyword']}")  # debug
 
         # Find the event to add notes to
         events = query_event(
@@ -275,6 +309,9 @@ def agent_process(user_message, conversation_id="default"):
             participants=notes_details["participants"],
             keyword=notes_details["keyword"]
         )
+        print(f"ADD_NOTES - Found {len(events)} matching events")  # debug
+        if events:
+            print(f"ADD_NOTES - First match: {events[0]['title']} at {events[0]['start_time']}")  # debug
 
         # Fallback: try without date filter
         if not events and notes_details["keyword"]:

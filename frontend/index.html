@@ -113,6 +113,90 @@ body {
 #send:hover { background: #3a7bc8; }
 #send:disabled { background: #a0c4e8; cursor: not-allowed; }
 
+/* Agenda Suggestion Box */
+.suggestion-box {
+    position: relative;
+    background: #d4edda;
+    border: 1px solid #28a745;
+    border-radius: 8px;
+    padding: 12px 15px;
+    margin: 0 15px 10px 15px;
+    color: #155724;
+    font-size: 0.9em;
+    animation: slideDown 0.3s ease-out;
+    box-shadow: 0 2px 8px rgba(40, 167, 69, 0.2);
+}
+
+@keyframes slideDown {
+    from { opacity: 0; transform: translateY(-10px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.suggestion-box::after {
+    content: '';
+    position: absolute;
+    bottom: -10px;
+    left: 50%;
+    transform: translateX(-50%);
+    border-width: 10px 10px 0 10px;
+    border-style: solid;
+    border-color: #28a745 transparent transparent transparent;
+}
+
+.suggestion-box-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 8px;
+}
+
+.suggestion-box-title {
+    font-weight: 600;
+    font-size: 0.95em;
+    color: #155724;
+}
+
+.suggestion-box-close {
+    background: none;
+    border: none;
+    color: #155724;
+    font-size: 1.2em;
+    cursor: pointer;
+    padding: 0 4px;
+    line-height: 1;
+    opacity: 0.7;
+}
+
+.suggestion-box-close:hover {
+    opacity: 1;
+}
+
+.suggestion-box-meeting {
+    font-size: 0.85em;
+    color: #1e7e34;
+    margin-bottom: 6px;
+}
+
+.suggestion-box-content {
+    white-space: pre-wrap;
+    line-height: 1.5;
+}
+
+.suggestion-box-use {
+    margin-top: 10px;
+    padding: 6px 12px;
+    background: #28a745;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.85em;
+}
+
+.suggestion-box-use:hover {
+    background: #218838;
+}
+
 /* Right column - Calendar */
 .calendar-panel {
     grid-column: 2;
@@ -227,6 +311,7 @@ body {
 <div class="left-panel">
     <div class="chat-container">
         <div id="chat"></div>
+        <div id="suggestionContainer"></div>
         <div id="inputArea">
             <input type="text" id="message" placeholder="Type a message..." />
             <button id="send">Send</button>
@@ -309,7 +394,22 @@ sendButton.onclick = async () => {
                 data.metadata.events_created.forEach(addEventToCalendar);
             }
             if (data.metadata.events_updated) {
-                data.metadata.events_updated.forEach(updateEventInCalendar);
+                data.metadata.events_updated.forEach(updatedEvent => {
+                    updateEventInCalendar(updatedEvent);
+
+                    // Check if notes were added to a PAST meeting (already passed)
+                    const eventTime = new Date(updatedEvent.start_time.replace(' ', 'T'));
+                    const now = new Date();
+                    const isPastEvent = eventTime < now;
+
+                    // If notes added to a past recurring meeting, show suggestions for upcoming ones
+                    if (isPastEvent && updatedEvent.recurrence_group && updatedEvent.notes) {
+                        // Clear dismissed suggestions for this recurring series
+                        // so the new suggestion based on these notes can appear
+                        clearDismissedForRecurrenceGroup(updatedEvent.recurrence_group);
+                        fetchAgendaSuggestions();
+                    }
+                });
             }
             if (data.metadata.events_deleted) {
                 data.metadata.events_deleted.forEach(e => {
@@ -439,8 +539,117 @@ document.getElementById('todayBtn').onclick = () => {
     renderCalendar();
 };
 
-// Initial render
+// Agenda Suggestions functionality
+let currentSuggestions = [];
+let dismissedSuggestions = new Set();
+
+// Clear dismissed suggestions for a specific recurrence group
+function clearDismissedForRecurrenceGroup(recurrenceGroup) {
+    // Find all events in this recurrence group and remove them from dismissed
+    for (const dateKey in events) {
+        events[dateKey].forEach(event => {
+            if (event.recurrence_group === recurrenceGroup) {
+                dismissedSuggestions.delete(event.event_id);
+            }
+        });
+    }
+}
+
+async function fetchAgendaSuggestions() {
+    try {
+        const res = await fetch('/agenda-suggestions');
+        if (!res.ok) return;
+        const data = await res.json();
+        currentSuggestions = data.suggestions || [];
+        showNextSuggestion();
+    } catch (err) {
+        console.error('Error fetching agenda suggestions:', err);
+    }
+}
+
+function showNextSuggestion() {
+    const container = document.getElementById('suggestionContainer');
+    container.innerHTML = '';
+
+    // Find first non-dismissed suggestion
+    const suggestion = currentSuggestions.find(s => !dismissedSuggestions.has(s.event_id));
+    if (!suggestion) return;
+
+    // Format the meeting time
+    let meetingTime = suggestion.event_time;
+    try {
+        const date = new Date(suggestion.event_time.replace(' ', 'T'));
+        meetingTime = date.toLocaleDateString('en-US', {
+            weekday: 'short',
+            month: 'short',
+            day: 'numeric',
+            hour: 'numeric',
+            minute: '2-digit'
+        });
+    } catch (e) {}
+
+    const box = document.createElement('div');
+    box.className = 'suggestion-box';
+    box.innerHTML = `
+        <div class="suggestion-box-header">
+            <span class="suggestion-box-title">Suggested Agenda Items</span>
+            <button class="suggestion-box-close" onclick="dismissSuggestion(${suggestion.event_id})">&times;</button>
+        </div>
+        <div class="suggestion-box-meeting">For: ${suggestion.event_title} (${meetingTime})</div>
+        <div class="suggestion-box-content">${escapeHtml(suggestion.suggested_agenda)}</div>
+        <button class="suggestion-box-use" onclick="useSuggestion(${suggestion.event_id})">Use as message</button>
+    `;
+    container.appendChild(box);
+}
+
+function dismissSuggestion(eventId) {
+    dismissedSuggestions.add(eventId);
+    showNextSuggestion();
+}
+
+function useSuggestion(eventId) {
+    const suggestion = currentSuggestions.find(s => s.event_id === eventId);
+    if (suggestion) {
+        const agendaText = `Add notes to ${suggestion.event_title}: ${suggestion.suggested_agenda.replace(/\n/g, ' ')}`;
+        messageInput.value = agendaText;
+        messageInput.focus();
+        dismissSuggestion(eventId);
+    }
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+// Fetch events and suggestions on page load
+async function initializeApp() {
+    try {
+        // Fetch existing events
+        const eventsRes = await fetch('/events');
+        if (eventsRes.ok) {
+            const data = await eventsRes.json();
+            // Group events by date
+            events = {};
+            (data.events || []).forEach(event => {
+                const dateKey = event.start_time.split(' ')[0];
+                if (!events[dateKey]) events[dateKey] = [];
+                events[dateKey].push(event);
+            });
+            renderCalendar();
+        }
+    } catch (err) {
+        console.error('Error loading events:', err);
+    }
+
+    // Fetch agenda suggestions
+    fetchAgendaSuggestions();
+}
+
+// Initial render and data load
 renderCalendar();
+initializeApp();
 </script>
 </body>
 </html>
