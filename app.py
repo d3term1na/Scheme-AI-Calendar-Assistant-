@@ -608,7 +608,13 @@ def agent_process(user_message, conversation_id="default"):
         for event in relevant_events:
             notes = event.get("notes", "")
             if notes and notes.strip():
-                event_context.append(f"Meeting '{event['title']}' on {event['start_time']}: {notes}")
+                # Format date naturally (e.g., "January 29")
+                try:
+                    event_dt = dt.strptime(event['start_time'], "%Y-%m-%d %H:%M:%S")
+                    date_str = event_dt.strftime("%B %d").replace(" 0", " ").lstrip("0")
+                except:
+                    date_str = event['start_time'].split(' ')[0]
+                event_context.append(f"Meeting '{event['title']}' on {date_str}: {notes}")
                 print(f"GENERAL - Found event with notes: {event['title']}")  # debug
 
         # Also get RAG context

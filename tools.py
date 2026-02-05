@@ -1009,11 +1009,17 @@ def embed_existing_event_notes():
     for event in calendar_events.values():
         notes = event.get("notes", "")
         if notes and notes.strip():
+            # Format date naturally (e.g., "January 29")
+            try:
+                event_dt = datetime.strptime(event['start_time'], "%Y-%m-%d %H:%M:%S")
+                date_str = event_dt.strftime("%B %d").replace(" 0", " ").lstrip("0")
+            except:
+                date_str = event['start_time'].split(' ')[0]
             # Embed the event notes with context
-            content = f"Meeting '{event['title']}' on {event['start_time']}: {notes}"
+            content = f"Meeting '{event['title']}' on {date_str}: {notes}"
             store_embedding(content, doc_type="meeting_notes")
             embedded_count += 1
-            print(f"[RAG] Embedded notes for: {event['title']} on {event['start_time']}")
+            print(f"[RAG] Embedded notes for: {event['title']} on {date_str}")
 
     print(f"[RAG] Embedded {embedded_count} event notes into RAG")
     return embedded_count
