@@ -999,6 +999,25 @@ def store_embedding(content, doc_type="conversation"):
     next_id += 1
     return next_id - 1
 
+
+def embed_existing_event_notes():
+    """
+    Embed notes from all existing calendar events into RAG.
+    Called on startup to make pre-populated event notes searchable.
+    """
+    embedded_count = 0
+    for event in calendar_events.values():
+        notes = event.get("notes", "")
+        if notes and notes.strip():
+            # Embed the event notes with context
+            content = f"Meeting '{event['title']}' on {event['start_time']}: {notes}"
+            store_embedding(content, doc_type="meeting_notes")
+            embedded_count += 1
+            print(f"[RAG] Embedded notes for: {event['title']} on {event['start_time']}")
+
+    print(f"[RAG] Embedded {embedded_count} event notes into RAG")
+    return embedded_count
+
 # Compare and rank vectors
 def retrieve_top_k(query_vector, k=3):
     """Retrieve top-k most similar embeddings"""

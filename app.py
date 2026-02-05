@@ -1,10 +1,14 @@
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from memory import conversation_memory, calendar_events
-from tools import create_event, query_event, update_event, delete_event, store_embedding, embed_model, retrieve_top_k, call_ollama, extract_event_details, extract_query_filters, extract_event_identifier, extract_update_details, extract_notes_details, extract_recurring_details, calculate_recurring_dates, classify_intent, get_upcoming_recurring_meetings, get_scheduling_insight, check_time_conflict, format_conflict_message, extract_bulk_operation_details
+from tools import create_event, query_event, update_event, delete_event, store_embedding, embed_model, retrieve_top_k, call_ollama, extract_event_details, extract_query_filters, extract_event_identifier, extract_update_details, extract_notes_details, extract_recurring_details, calculate_recurring_dates, classify_intent, get_upcoming_recurring_meetings, get_scheduling_insight, check_time_conflict, format_conflict_message, extract_bulk_operation_details, embed_existing_event_notes
 from datetime import datetime as dt, timedelta
 
 app = FastAPI()
+
+# Embed existing event notes into RAG on startup
+# This makes pre-populated sample event notes searchable
+embed_existing_event_notes()
 
 # -----------------------------
 # Agenda Suggestions Endpoint
@@ -586,23 +590,39 @@ def agent_process(user_message, conversation_id="default"):
                     reply = f"Done! I've cancelled {len(deleted_events)} events on {source_str}: {', '.join(event_names)}."
                 metadata["events_deleted"] = deleted_events
     else:  # GENERAL or fallback
+        # First, try to find relevant calendar events with notes
+        # Extract filters to find specific events the user is asking about
+        filters = extract_query_filters(user_message)
+        print(f"GENERAL - Extracted filters: {filters}")  # debug
+
+        # Search for events matching the query
+        relevant_events = query_event(
+            start_date=filters["start_date"],
+            end_date=filters["end_date"],
+            participants=filters["participants"],
+            keyword=filters["keyword"]
+        )
+
+        # Build context from matching events with notes
+        event_context = []
+        for event in relevant_events:
+            notes = event.get("notes", "")
+            if notes and notes.strip():
+                event_context.append(f"Meeting '{event['title']}' on {event['start_time']}: {notes}")
+                print(f"GENERAL - Found event with notes: {event['title']}")  # debug
+
+        # Also get RAG context
         query_vec = embed_model.encode(user_message)
         top_docs = retrieve_top_k(query_vec, k=3)
-        context_text = "\n".join(top_docs) or "No relevant context."
+
+        # Combine event notes context with RAG context
+        all_context = event_context + top_docs
+        context_text = "\n".join(all_context) if all_context else "No relevant context."
         print("Context text:", context_text)
-        # prompt = f"""
-        # You are an AI calendar assistant.
-        # Only answer the user query.
 
-        # Context:
-        # {context_text}
-
-        # User query: {user_message}
-
-        # """
-        # print(prompt)
-        reply = call_ollama(user_message,context_text)
+        reply = call_ollama(user_message, context_text)
         metadata["retrieved_docs"] = top_docs
+        metadata["relevant_events"] = relevant_events
         store_embedding(f"User: {user_message}", doc_type="conversation")
     history.append({"agent": reply})
     conversation_memory[conversation_id] = history
