@@ -301,6 +301,8 @@ def classify_intent(user_message):
 - QUERY: User wants to see their SCHEDULE - list events, check availability, see what's on calendar (NOT asking about meeting content)
 - UPDATE: User wants to change, modify, reschedule, or update an existing event (time, title, participants)
 - ADD_NOTES: User wants to add notes, comments, or a summary to an existing event (STATEMENTS like "We discussed X", "The meeting covered Y")
+- BULK_RESCHEDULE: User wants to move/push/reschedule ALL events from one date to another ("push everything today to tomorrow", "move all my meetings from Friday to Monday")
+- BULK_CANCEL: User wants to cancel/delete ALL events on a specific date ("cancel everything today", "clear my calendar tomorrow")
 - GENERAL: Questions about meeting CONTENT/DISCUSSIONS (like "What did we discuss?", "What was decided?", "How much was X increased?")
 
 Important:
@@ -308,18 +310,20 @@ Important:
 - "schedule a meeting tomorrow" = CREATE (single event, no recurrence)
 - "Don't delete" or "I don't want to remove" = NOT delete intent
 - "What's on my calendar?" or "Am I free tomorrow?" = QUERY intent
-- "Move my meeting to..." or "Change the time of..." = UPDATE intent
+- "Move my meeting to..." or "Change the time of..." = UPDATE intent (single event)
+- "Push everything today to tomorrow" or "Move all meetings from X to Y" = BULK_RESCHEDULE
+- "Cancel everything today" or "Clear my calendar for tomorrow" = BULK_CANCEL
 - "Add notes to my meeting..." or "We discussed X" (STATEMENT) = ADD_NOTES intent
 - "What did we discuss?" (QUESTION about past meetings) = GENERAL intent
 
 Message: {user_message}
 
-Respond with ONLY the category name (CREATE_RECURRING, CREATE, DELETE, QUERY, UPDATE, ADD_NOTES, or GENERAL):"""
+Respond with ONLY the category name (CREATE_RECURRING, CREATE, DELETE, QUERY, UPDATE, ADD_NOTES, BULK_RESCHEDULE, BULK_CANCEL, or GENERAL):"""
 
     payload = {
         "model": MODEL_NAME,
         "messages": [
-            {"role": "system", "content": "You classify user intents. Respond with only one word: CREATE_RECURRING, CREATE, DELETE, QUERY, UPDATE, ADD_NOTES, or GENERAL."},
+            {"role": "system", "content": "You classify user intents. Respond with only one word: CREATE_RECURRING, CREATE, DELETE, QUERY, UPDATE, ADD_NOTES, BULK_RESCHEDULE, BULK_CANCEL, or GENERAL."},
             {"role": "user", "content": classification_prompt}
         ],
         "stream": False
@@ -331,8 +335,8 @@ Respond with ONLY the category name (CREATE_RECURRING, CREATE, DELETE, QUERY, UP
         response = res.json()["message"]["content"].strip().upper()
 
         # Extract just the intent keyword if there's extra text
-        # Check CREATE_RECURRING before CREATE to avoid partial match
-        for intent in ["CREATE_RECURRING", "CREATE", "DELETE", "QUERY", "UPDATE", "ADD_NOTES", "GENERAL"]:
+        # Check longer intents first to avoid partial matches
+        for intent in ["CREATE_RECURRING", "BULK_RESCHEDULE", "BULK_CANCEL", "CREATE", "DELETE", "QUERY", "UPDATE", "ADD_NOTES", "GENERAL"]:
             if intent in response:
                 return intent
 
@@ -437,7 +441,9 @@ JSON:"""
 
 def extract_query_filters(user_message):
     """Use LLM to extract query/filter criteria from natural language."""
-    extraction_prompt = f"""Extract search filters from this message. Today is {today}.
+    current_year = datetime.now().year
+    tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+    extraction_prompt = f"""Extract search filters from this message. Today is {today}, tomorrow is {tomorrow}.
 
 Return ONLY valid JSON with these fields (use null if NOT EXPLICITLY specified):
 - start_date: string in "YYYY-MM-DD" format or null (start of date range)
@@ -445,17 +451,17 @@ Return ONLY valid JSON with these fields (use null if NOT EXPLICITLY specified):
 - participants: array of strings (names mentioned) or null
 - keyword: string (event title/topic to search for) or null
 
-IMPORTANT: Only extract filters that are EXPLICITLY mentioned. Do NOT infer or assume dates.
+IMPORTANT:
+- "today" = {today}
+- "tomorrow" = {tomorrow}
+- "Feb 2" or "February 2" = "{current_year}-02-02"
 - If no date is mentioned, use null for both start_date and end_date
-- "What's on my calendar?" with no date = all nulls (show ALL events)
-- "Show my events" with no date = all nulls (show ALL events)
 
 Examples:
-- "delete my meeting with Bob tomorrow" -> {{"start_date": "{today}", "end_date": "{today}", "participants": ["Bob"], "keyword": "meeting"}}
-- "show events this week" -> {{"start_date": "...", "end_date": "...", "participants": null, "keyword": null}}
-- "what's on my calendar next Friday" -> {{"start_date": "next Friday date", "end_date": "next Friday date", "participants": null, "keyword": null}}
+- "Who is the Project Review tomorrow with?" -> {{"start_date": "{tomorrow}", "end_date": "{tomorrow}", "participants": null, "keyword": "Project Review"}}
+- "Who was the Morning Planning with on Feb 2?" -> {{"start_date": "{current_year}-02-02", "end_date": "{current_year}-02-02", "participants": null, "keyword": "Morning Planning"}}
+- "What's on my calendar today?" -> {{"start_date": "{today}", "end_date": "{today}", "participants": null, "keyword": null}}
 - "what's on my calendar?" -> {{"start_date": null, "end_date": null, "participants": null, "keyword": null}}
-- "show all my events" -> {{"start_date": null, "end_date": null, "participants": null, "keyword": null}}
 - "list events with Alice" -> {{"start_date": null, "end_date": null, "participants": ["Alice"], "keyword": null}}
 
 Message: {user_message}
@@ -482,9 +488,28 @@ JSON:"""
             response_text = json_match.group(1)
 
         filters = json.loads(response_text.strip())
+
+        # Post-process dates to handle relative date strings the LLM might return
+        start_date = filters.get("start_date")
+        end_date = filters.get("end_date")
+
+        if start_date:
+            start_lower = start_date.lower().strip()
+            if start_lower == "today" or "today" in start_lower:
+                start_date = today
+            elif start_lower == "tomorrow" or "tomorrow" in start_lower:
+                start_date = tomorrow
+
+        if end_date:
+            end_lower = end_date.lower().strip()
+            if end_lower == "today" or "today" in end_lower:
+                end_date = today
+            elif end_lower == "tomorrow" or "tomorrow" in end_lower:
+                end_date = tomorrow
+
         return {
-            "start_date": filters.get("start_date"),
-            "end_date": filters.get("end_date"),
+            "start_date": start_date,
+            "end_date": end_date,
             "participants": filters.get("participants"),
             "keyword": filters.get("keyword")
         }
@@ -888,6 +913,80 @@ def calculate_recurring_dates(details):
 
     return dates
 
+
+def extract_bulk_operation_details(user_message):
+    """Extract source date and destination date for bulk reschedule/cancel operations."""
+    extraction_prompt = f"""Extract the dates from this bulk calendar operation. Today is {today} ({datetime.now().strftime("%A")}).
+
+The user wants to move/reschedule/cancel ALL events from one date. Extract:
+- source_date: The date to move events FROM (or cancel events on)
+- destination_date: The date to move events TO (null if canceling)
+
+Return ONLY valid JSON with these fields:
+- source_date: string in "YYYY-MM-DD" format (the date events are being moved FROM)
+- destination_date: string in "YYYY-MM-DD" format or null (the date events are being moved TO, null if canceling)
+
+IMPORTANT:
+- "today" = {today}
+- "tomorrow" = the day after today
+- "Push everything today to tomorrow" -> source_date: today, destination_date: tomorrow
+- "Cancel everything on Friday" -> source_date: next Friday, destination_date: null
+- "Move all meetings from Feb 10 to Feb 12" -> source_date: "2026-02-10", destination_date: "2026-02-12"
+
+Message: {user_message}
+
+JSON:"""
+
+    payload = {
+        "model": MODEL_NAME,
+        "messages": [
+            {"role": "system", "content": "You extract dates for bulk calendar operations. Return only valid JSON."},
+            {"role": "user", "content": extraction_prompt}
+        ],
+        "stream": False
+    }
+
+    try:
+        res = requests.post(OLLAMA_URL, json=payload, timeout=30)
+        res.raise_for_status()
+        response_text = res.json()["message"]["content"]
+
+        json_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', response_text)
+        if json_match:
+            response_text = json_match.group(1)
+
+        details = json.loads(response_text.strip())
+
+        # Handle relative dates
+        source_date = details.get("source_date")
+        destination_date = details.get("destination_date")
+
+        if source_date:
+            source_lower = source_date.lower().strip()
+            if source_lower == "today":
+                source_date = today
+            elif source_lower == "tomorrow":
+                source_date = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+
+        if destination_date:
+            dest_lower = destination_date.lower().strip()
+            if dest_lower == "today":
+                destination_date = today
+            elif dest_lower == "tomorrow":
+                destination_date = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+
+        return {
+            "source_date": source_date,
+            "destination_date": destination_date
+        }
+    except Exception as e:
+        print("Bulk operation extraction error:", e)
+        return {
+            "source_date": today,
+            "destination_date": None
+        }
+
+
 # -----------------------------
 # RAG
 # -----------------------------
@@ -916,6 +1015,61 @@ def cosine_similarity(a, b):
 # -----------------------------
 # Calendar event CRUD functions
 # -----------------------------
+def check_time_conflict(start_time, end_time, exclude_event_id=None):
+    """
+    Check if a new event would conflict with existing events.
+    Returns a list of conflicting events, or empty list if no conflicts.
+
+    A conflict occurs when:
+    - New event starts during an existing event
+    - New event ends during an existing event
+    - New event completely contains an existing event
+    """
+    conflicts = []
+
+    try:
+        new_start = datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S")
+        new_end = datetime.strptime(end_time, "%Y-%m-%d %H:%M:%S")
+    except (ValueError, TypeError):
+        return []  # Can't check conflicts with invalid times
+
+    for event in calendar_events.values():
+        # Skip the event we're updating (if any)
+        if exclude_event_id is not None and event.get("event_id") == exclude_event_id:
+            continue
+
+        try:
+            existing_start = datetime.strptime(event["start_time"], "%Y-%m-%d %H:%M:%S")
+            existing_end = datetime.strptime(event["end_time"], "%Y-%m-%d %H:%M:%S")
+        except (ValueError, TypeError):
+            continue
+
+        # Check for overlap
+        # Two events overlap if one starts before the other ends AND ends after the other starts
+        if new_start < existing_end and new_end > existing_start:
+            conflicts.append(event)
+
+    return conflicts
+
+
+def format_conflict_message(conflicts):
+    """Format a user-friendly message about conflicting events."""
+    if len(conflicts) == 1:
+        event = conflicts[0]
+        time_str = event["start_time"]
+        try:
+            parsed = datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S")
+            time_str = parsed.strftime("%B %d at %I:%M %p").replace(" 0", " ").lstrip("0")
+        except:
+            pass
+        return f"This conflicts with '{event['title']}' scheduled for {time_str}."
+    else:
+        event_names = [f"'{e['title']}'" for e in conflicts[:3]]
+        if len(conflicts) > 3:
+            return f"This conflicts with {', '.join(event_names)} and {len(conflicts) - 3} other event(s)."
+        return f"This conflicts with {' and '.join(event_names)}."
+
+
 def create_event(title, start_time, end_time, participants=None, notes="", recurrence_group=None):
     global event_count
     calendar_events[event_count] = {
