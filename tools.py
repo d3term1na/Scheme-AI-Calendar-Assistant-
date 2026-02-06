@@ -1,7 +1,7 @@
-from memory import calendar_events, event_count, embeddings, next_id
+import db
 from datetime import datetime, timedelta
 import numpy as np
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import SentenceTransformer, util
 import requests
 import json
 import re
@@ -25,13 +25,16 @@ embed_model = SentenceTransformer('all-MiniLM-L6-v2')
 
 def extract_timezone_from_message(user_message):
     """Use LLM to detect if a timezone is mentioned in the user message."""
-    extraction_prompt = f"""Analyze this message and determine if a timezone is mentioned.
+    extraction_prompt = f"""Analyze this message and determine if a timezone is EXPLICITLY mentioned.
+
+IMPORTANT: "am" and "pm" in times like "6pm", "9am", "3:00pm" are NOT timezones! They are just time indicators.
+Only return a timezone if the user EXPLICITLY mentions a timezone like "PST", "EST", "Pacific time", etc.
 
 Common timezone abbreviations and their IANA names:
-- PST/PDT/Pacific -> America/Los_Angeles
-- EST/EDT/Eastern -> America/New_York
-- CST/CDT/Central -> America/Chicago
-- MST/MDT/Mountain -> America/Denver
+- PST/PDT/Pacific time -> America/Los_Angeles
+- EST/EDT/Eastern time -> America/New_York
+- CST/CDT/Central time -> America/Chicago
+- MST/MDT/Mountain time -> America/Denver
 - GMT/UTC -> UTC
 - BST/London -> Europe/London
 - CET/Paris/Berlin -> Europe/Paris
@@ -41,9 +44,14 @@ Common timezone abbreviations and their IANA names:
 - AEST/Sydney -> Australia/Sydney
 - HKT/Hong Kong -> Asia/Hong_Kong
 - KST/Seoul -> Asia/Seoul
-- CST (China) -> Asia/Shanghai
 
-If a timezone IS mentioned, return the IANA timezone name (e.g., "America/Los_Angeles").
+Examples:
+- "meeting at 6pm" -> null (no timezone, just a time)
+- "meeting at 3pm PST" -> America/Los_Angeles
+- "call at 9am Eastern" -> America/New_York
+- "Friday 6pm" -> null (no timezone)
+
+If a timezone IS explicitly mentioned, return the IANA timezone name.
 If NO timezone is mentioned, return "null".
 
 Message: {user_message}
@@ -297,33 +305,40 @@ def classify_intent(user_message):
 
 - CREATE_RECURRING: User wants to create RECURRING/REPEATED events (every week, every day, weekly, daily, "for the next X weeks")
 - CREATE: User wants to schedule a SINGLE one-time event/meeting/appointment
-- DELETE: User wants to remove, cancel, or delete an existing event
+- DELETE: User wants to remove, cancel, or delete a SINGLE existing event
+- DELETE_RECURRING: User wants to remove/cancel ALL events in a recurring series ("remove all my standups", "delete all Team Meetings", "cancel all my 1:1s")
 - QUERY: User wants to see their SCHEDULE - list events, check availability, see what's on calendar (NOT asking about meeting content)
-- UPDATE: User wants to change, modify, reschedule, or update an existing event (time, title, participants)
+- UPDATE: User wants to change, modify, reschedule, or update a SINGLE existing event (time, title, participants)
+- UPDATE_RECURRING: User wants to change ALL events in a recurring series ("rename all my Project Reviews to Budget Reviews", "move all my Morning Plannings to Tuesday", "change all standups to 10am")
 - ADD_NOTES: User wants to add notes, comments, or a summary to an existing event (STATEMENTS like "We discussed X", "The meeting covered Y")
-- BULK_RESCHEDULE: User wants to move/push/reschedule ALL events from one date to another ("push everything today to tomorrow", "move all my meetings from Friday to Monday")
-- BULK_CANCEL: User wants to cancel/delete ALL events on a specific date ("cancel everything today", "clear my calendar tomorrow")
+- BULK_RESCHEDULE: User wants to move/push/reschedule ALL events from one DATE to another DATE ("push everything today to tomorrow", "move all my meetings from Friday to Monday")
+- BULK_CANCEL: User wants to cancel/delete ALL events on a specific DATE ("cancel everything today", "clear my calendar tomorrow")
 - GENERAL: Questions about meeting CONTENT/DISCUSSIONS (like "What did we discuss?", "What was decided?", "How much was X increased?")
+
+CRITICAL DISTINCTION - Recurring series vs Date-based:
+- UPDATE_RECURRING/DELETE_RECURRING: Targets a recurring SERIES by name ("all my standups", "all Project Reviews")
+- BULK_RESCHEDULE/BULK_CANCEL: Targets a specific DATE ("everything today", "all meetings on Friday")
 
 Important:
 - "every Friday", "weekly", "every week", "daily", "for the next 4 weeks" = CREATE_RECURRING (not CREATE)
 - "schedule a meeting tomorrow" = CREATE (single event, no recurrence)
-- "Don't delete" or "I don't want to remove" = NOT delete intent
-- "What's on my calendar?" or "Am I free tomorrow?" = QUERY intent
-- "Move my meeting to..." or "Change the time of..." = UPDATE intent (single event)
-- "Push everything today to tomorrow" or "Move all meetings from X to Y" = BULK_RESCHEDULE
-- "Cancel everything today" or "Clear my calendar for tomorrow" = BULK_CANCEL
+- "Delete the standup" or "Cancel tomorrow's meeting" = DELETE (single event)
+- "Remove ALL my standups" or "Delete all Team Meetings" = DELETE_RECURRING (recurring series)
+- "Move my meeting to 3pm" = UPDATE (single event)
+- "Change ALL my standups to 10am" or "Rename all Project Reviews" = UPDATE_RECURRING (recurring series)
+- "Push everything today to tomorrow" = BULK_RESCHEDULE (date-based)
+- "Cancel everything today" = BULK_CANCEL (date-based)
 - "Add notes to my meeting..." or "We discussed X" (STATEMENT) = ADD_NOTES intent
 - "What did we discuss?" (QUESTION about past meetings) = GENERAL intent
 
 Message: {user_message}
 
-Respond with ONLY the category name (CREATE_RECURRING, CREATE, DELETE, QUERY, UPDATE, ADD_NOTES, BULK_RESCHEDULE, BULK_CANCEL, or GENERAL):"""
+Respond with ONLY the category name:"""
 
     payload = {
         "model": MODEL_NAME,
         "messages": [
-            {"role": "system", "content": "You classify user intents. Respond with only one word: CREATE_RECURRING, CREATE, DELETE, QUERY, UPDATE, ADD_NOTES, BULK_RESCHEDULE, BULK_CANCEL, or GENERAL."},
+            {"role": "system", "content": "You classify user intents. Respond with only one word: CREATE_RECURRING, CREATE, DELETE, DELETE_RECURRING, QUERY, UPDATE, UPDATE_RECURRING, ADD_NOTES, BULK_RESCHEDULE, BULK_CANCEL, or GENERAL."},
             {"role": "user", "content": classification_prompt}
         ],
         "stream": False
@@ -336,7 +351,7 @@ Respond with ONLY the category name (CREATE_RECURRING, CREATE, DELETE, QUERY, UP
 
         # Extract just the intent keyword if there's extra text
         # Check longer intents first to avoid partial matches
-        for intent in ["CREATE_RECURRING", "BULK_RESCHEDULE", "BULK_CANCEL", "CREATE", "DELETE", "QUERY", "UPDATE", "ADD_NOTES", "GENERAL"]:
+        for intent in ["CREATE_RECURRING", "UPDATE_RECURRING", "DELETE_RECURRING", "BULK_RESCHEDULE", "BULK_CANCEL", "CREATE", "DELETE", "QUERY", "UPDATE", "ADD_NOTES", "GENERAL"]:
             if intent in response:
                 return intent
 
@@ -987,26 +1002,263 @@ JSON:"""
         }
 
 
+def extract_recurring_operation_details(user_message):
+    """
+    Extract details for recurring series operations (UPDATE_RECURRING, DELETE_RECURRING).
+
+    These target a recurring SERIES by name, not a specific date.
+    Examples:
+    - "Change the title of all my Project Reviews to Budget Reviews"
+    - "Reschedule all my Morning Plannings to every Tuesday 3pm"
+    - "Remove all my Team Standups"
+    """
+    extraction_prompt = f"""Extract details for an operation on a RECURRING event series. Today is {today} ({datetime.now().strftime("%A")}).
+
+The user wants to modify or delete ALL occurrences in a recurring series. Extract:
+
+1. series_keyword: The name/title of the recurring series to target (e.g., "standups", "Project Review", "Morning Planning")
+2. For updates, what changes to make:
+   - new_title: New name for the series (null if not changing title)
+   - new_day: New day of week (null if not changing day) - use lowercase: "monday", "tuesday", etc.
+   - new_time: New time in HH:MM:SS format (null if not changing time)
+
+Return ONLY valid JSON with these fields:
+- series_keyword: string (the recurring series name to search for)
+- new_title: string or null (new name if renaming)
+- new_day: string or null (new day of week if rescheduling, lowercase)
+- new_time: string in "HH:MM:SS" format or null (new time if rescheduling)
+
+IMPORTANT:
+- "all my standups" -> series_keyword: "standup"
+- "all Project Reviews" -> series_keyword: "Project Review"
+- "all my Morning Plannings" -> series_keyword: "Morning Planning"
+- "all 1:1s" or "all one-on-ones" -> series_keyword: "1:1"
+
+TIME CONVERSION (use 24-hour format):
+- AM times: "9am" -> "09:00:00", "10am" -> "10:00:00", "11am" -> "11:00:00"
+- PM times: Add 12 to the hour! "1pm" -> "13:00:00", "2pm" -> "14:00:00", "3pm" -> "15:00:00", "4pm" -> "16:00:00", "5pm" -> "17:00:00", "6pm" -> "18:00:00", "7pm" -> "19:00:00"
+- Special: "12pm" (noon) -> "12:00:00", "12am" (midnight) -> "00:00:00"
+
+Examples:
+- "Change the title of all my Project Reviews to Budget Reviews" -> {{"series_keyword": "Project Review", "new_title": "Budget Reviews", "new_day": null, "new_time": null}}
+- "Reschedule all my Morning Plannings to every Tuesday 3pm" -> {{"series_keyword": "Morning Planning", "new_title": null, "new_day": "tuesday", "new_time": "15:00:00"}}
+- "Move all standups to 10am" -> {{"series_keyword": "standup", "new_title": null, "new_day": null, "new_time": "10:00:00"}}
+- "Reschedule all 1:1s to Friday 6pm" -> {{"series_keyword": "1:1", "new_title": null, "new_day": "friday", "new_time": "18:00:00"}}
+- "Remove all my Team Standups" -> {{"series_keyword": "Team Standup", "new_title": null, "new_day": null, "new_time": null}}
+- "Delete all 1:1s with Manager" -> {{"series_keyword": "1:1", "new_title": null, "new_day": null, "new_time": null}}
+
+Message: {user_message}
+
+JSON:"""
+
+    payload = {
+        "model": MODEL_NAME,
+        "messages": [
+            {"role": "system", "content": "You extract recurring series operation details. Return only valid JSON. CRITICAL: For PM times, ADD 12 to the hour (1pm=13:00, 2pm=14:00, 3pm=15:00, 4pm=16:00, 5pm=17:00, 6pm=18:00, 7pm=19:00, 8pm=20:00)."},
+            {"role": "user", "content": extraction_prompt}
+        ],
+        "stream": False
+    }
+
+    try:
+        res = requests.post(OLLAMA_URL, json=payload, timeout=30)
+        res.raise_for_status()
+        response_text = res.json()["message"]["content"]
+
+        json_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', response_text)
+        if json_match:
+            response_text = json_match.group(1)
+
+        details = json.loads(response_text.strip())
+        print(f"LLM extracted details: {details}")  # debug
+
+        # Handle timezone conversion for new_time if present
+        new_time = details.get("new_time")
+        if new_time:
+            source_tz = extract_timezone_from_message(user_message)
+            if source_tz:
+                print(f"Detected timezone: {source_tz}, converting time to SGT")
+                new_time = convert_time_to_local_tz(new_time, source_tz)
+
+        return {
+            "series_keyword": details.get("series_keyword"),
+            "new_title": details.get("new_title"),
+            "new_day": details.get("new_day"),
+            "new_time": new_time
+        }
+    except Exception as e:
+        print("Recurring operation extraction error:", e)
+        return {
+            "series_keyword": None,
+            "new_title": None,
+            "new_day": None,
+            "new_time": None
+        }
+
+
+def find_recurring_series_events(username, series_keyword):
+    """
+    Find all events that belong to a recurring series matching the keyword.
+    Returns list of events that share the same recurrence_group.
+    """
+    if not series_keyword:
+        return []
+
+    keyword_lower = series_keyword.lower().strip()
+    all_events = db.get_user_events(username)
+
+    # First, find events that match the keyword
+    matching_groups = set()
+
+    for event in all_events:
+        title_lower = event.get("title", "").lower().strip()
+        recurrence_group = event.get("recurrence_group")
+
+        # Check if title matches the keyword
+        if keyword_lower in title_lower or title_lower in keyword_lower:
+            if recurrence_group:
+                matching_groups.add(recurrence_group)
+
+    # Now get ALL events in those recurrence groups
+    results = []
+    for event in all_events:
+        if event.get("recurrence_group") in matching_groups:
+            results.append(event)
+
+    # Sort by start_time
+    results.sort(key=lambda e: e.get("start_time", ""))
+
+    return results
+
+
+def update_recurring_series(username, series_keyword, new_title=None, new_day=None, new_time=None):
+    """
+    Update all events in a recurring series.
+
+    Parameters:
+    - username: The user who owns the events
+    - series_keyword: Name of the series to find
+    - new_title: New title for all events (optional)
+    - new_day: New day of week, e.g., "tuesday" (optional)
+    - new_time: New time in HH:MM:SS format (optional)
+
+    Returns dict with count of updated events and list of updated events.
+    """
+    events = find_recurring_series_events(username, series_keyword)
+
+    if not events:
+        return {"count": 0, "events": [], "error": f"No recurring series found matching '{series_keyword}'"}
+
+    day_map = {
+        "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+        "friday": 4, "saturday": 5, "sunday": 6
+    }
+
+    updated_events = []
+
+    for event in events:
+        updates = {}
+
+        # Update title if specified
+        if new_title:
+            updates["title"] = new_title
+
+        # Update time/day if specified
+        if new_day or new_time:
+            try:
+                current_start = datetime.strptime(event["start_time"], "%Y-%m-%d %H:%M:%S")
+                current_end = datetime.strptime(event["end_time"], "%Y-%m-%d %H:%M:%S")
+                duration = current_end - current_start
+
+                # If changing day of week
+                if new_day:
+                    target_day = day_map.get(new_day.lower())
+                    if target_day is not None:
+                        current_day = current_start.weekday()
+                        days_diff = target_day - current_day
+                        current_start = current_start + timedelta(days=days_diff)
+
+                # If changing time
+                if new_time:
+                    time_parts = new_time.split(":")
+                    hour = int(time_parts[0])
+                    minute = int(time_parts[1]) if len(time_parts) > 1 else 0
+                    second = int(time_parts[2]) if len(time_parts) > 2 else 0
+                    current_start = current_start.replace(hour=hour, minute=minute, second=second)
+
+                # Calculate new end time preserving duration
+                new_end = current_start + duration
+
+                updates["start_time"] = current_start.strftime("%Y-%m-%d %H:%M:%S")
+                updates["end_time"] = new_end.strftime("%Y-%m-%d %H:%M:%S")
+            except Exception as e:
+                print(f"Error updating time for event {event.get('event_id')}: {e}")
+                continue
+
+        if updates:
+            event_id = event.get("event_id")
+            updated_event = db.update_event(event_id, **updates)
+            if updated_event:
+                updated_events.append(updated_event)
+
+    return {
+        "count": len(updated_events),
+        "events": updated_events,
+        "series_keyword": series_keyword
+    }
+
+
+def delete_recurring_series(username, series_keyword):
+    """
+    Delete all events in a recurring series.
+
+    Parameters:
+    - username: The user who owns the events
+    - series_keyword: Name of the series to find and delete
+
+    Returns dict with count of deleted events.
+    """
+    events = find_recurring_series_events(username, series_keyword)
+
+    if not events:
+        return {"count": 0, "deleted": [], "error": f"No recurring series found matching '{series_keyword}'"}
+
+    deleted_events = []
+
+    for event in events:
+        event_id = event.get("event_id")
+        try:
+            deleted = db.delete_event(event_id)
+            if deleted:
+                deleted_events.append(deleted)
+        except Exception as e:
+            print(f"Error deleting event {event_id}: {e}")
+
+    return {
+        "count": len(deleted_events),
+        "deleted": deleted_events,
+        "series_keyword": series_keyword
+    }
+
+
 # -----------------------------
 # RAG
 # -----------------------------
 # Vectorisation
-def store_embedding(content, doc_type="conversation"):
-    """Store embedding in the in-memory dictionary"""
-    global next_id
+def store_event_embedding(event_id, content):
+    """Store embedding for an event in the database."""
     vector = embed_model.encode(content)
-    embeddings[next_id] = {"content": content, "vector": vector, "type": doc_type}
-    next_id += 1
-    return next_id - 1
+    db.update_event_embedding(event_id, vector)
+    return vector
 
-
-def embed_existing_event_notes():
+def embed_existing_event_notes(username):
     """
     Embed notes from all existing calendar events into RAG.
     Called on startup to make pre-populated event notes searchable.
     """
     embedded_count = 0
-    for event in calendar_events.values():
+    all_events = db.get_user_events(username)
+    for event in all_events:
         notes = event.get("notes", "")
         if notes and notes.strip():
             # Format date naturally (e.g., "January 29")
@@ -1017,30 +1269,41 @@ def embed_existing_event_notes():
                 date_str = event['start_time'].split(' ')[0]
             # Embed the event notes with context
             content = f"Meeting '{event['title']}' on {date_str}: {notes}"
-            store_embedding(content, doc_type="meeting_notes")
+            store_event_embedding(event["event_id"], content)
             embedded_count += 1
             print(f"[RAG] Embedded notes for: {event['title']} on {date_str}")
 
     print(f"[RAG] Embedded {embedded_count} event notes into RAG")
     return embedded_count
 
-# Compare and rank vectors
-def retrieve_top_k(query_vector, k=3):
-    """Retrieve top-k most similar embeddings"""
+# Compare and rank vectors, retrieve top 3 contexts
+def retrieve_top_k(username, query_vector, k=3):
+    """Retrieve top-k most similar embeddings from events and conversations."""
+    results = []
 
-    scored = [(doc, cosine_similarity(query_vector, data["vector"]))
-              for doc, data in embeddings.items()]
-    scored.sort(key=lambda x: x[1], reverse=True)
-    return [embeddings[doc]["content"] for doc, score in scored[:k]]
+    # Get events with embeddings
+    events_with_embeddings = db.get_events_with_embeddings(username)
+    for event in events_with_embeddings:
+        if event["embedding"] is not None:
+            similarity = util.cos_sim(query_vector, event["embedding"]).item()
+            content = f"Meeting '{event['title']}' on {event['start_time'].split(' ')[0]}: {event['notes']}"
+            results.append((content, similarity))
 
-# Similarity score
-def cosine_similarity(a, b):
-        return np.dot(a, b) / (norm(a) * norm(b))
+    # Get conversations with embeddings
+    conversations_with_embeddings = db.get_conversations_with_embeddings(username)
+    for conv in conversations_with_embeddings:
+        if conv["embedding"] is not None:
+            similarity = util.cos_sim(query_vector, conv["embedding"]).item()
+            results.append((conv["content"], similarity))
+
+    # Sort by similarity and return top k
+    results.sort(key=lambda x: x[1], reverse=True)
+    return [content for content, _ in results[:k]]
 
 # -----------------------------
 # Calendar event CRUD functions
 # -----------------------------
-def check_time_conflict(start_time, end_time, exclude_event_id=None):
+def check_time_conflict(username, start_time, end_time, exclude_event_id=None):
     """
     Check if a new event would conflict with existing events.
     Returns a list of conflicting events, or empty list if no conflicts.
@@ -1058,7 +1321,8 @@ def check_time_conflict(start_time, end_time, exclude_event_id=None):
     except (ValueError, TypeError):
         return []  # Can't check conflicts with invalid times
 
-    for event in calendar_events.values():
+    all_events = db.get_user_events(username)
+    for event in all_events:
         # Skip the event we're updating (if any)
         if exclude_event_id is not None and event.get("event_id") == exclude_event_id:
             continue
@@ -1094,112 +1358,10 @@ def format_conflict_message(conflicts):
             return f"This conflicts with {', '.join(event_names)} and {len(conflicts) - 3} other event(s)."
         return f"This conflicts with {' and '.join(event_names)}."
 
-
-def create_event(title, start_time, end_time, participants=None, notes="", recurrence_group=None):
-    global event_count
-    calendar_events[event_count] = {
-        "event_id": event_count,
-        "title": title,
-        "start_time": start_time,
-        "end_time": end_time,
-        "participants": participants or [],
-        "notes": notes,
-        "recurrence_group": recurrence_group  # Groups recurring events together
-    }
-    event = calendar_events[event_count]
-    event_count += 1
-    return event
-    
-def update_event(event_id, **updates):
-    if event_id in calendar_events:
-        calendar_events[event_id].update(updates)
-        return calendar_events[event_id]
-    return None
-
-def delete_event(event_id):
-    event = calendar_events.pop(event_id)
-    return event
-
-def query_event(start_date=None, end_date=None, participants=None, keyword=None):
-    '''
-    Parameters:
-        start_date (str) - "YYYY-MM-DD" format or None
-        end_date (str)   - "YYYY-MM-DD" format or None
-        participants (list of str) - participants to match, or None
-        keyword (str)    - keyword to search in title or notes, or None
-    '''
-    results = []
-
-    for event in calendar_events.values():
-        match = True
-        match_score = 0  # Higher score = better match
-
-        # Check date range - handle invalid date formats gracefully
-        try:
-            event_date = datetime.fromisoformat(event["start_time"]).date()
-        except (ValueError, TypeError):
-            # Try parsing with strptime as fallback
-            try:
-                event_date = datetime.strptime(event["start_time"], "%Y-%m-%d %H:%M:%S").date()
-            except (ValueError, TypeError):
-                # Skip date filtering for events with invalid dates
-                print(f"Warning: Event '{event.get('title')}' has invalid date format: {event.get('start_time')}")
-                event_date = None
-        if start_date and event_date:
-            try:
-                start_dt = datetime.fromisoformat(start_date).date()
-                if event_date < start_dt:
-                    match = False
-            except (ValueError, TypeError):
-                pass  # Skip date filter if invalid
-        if end_date and event_date:
-            try:
-                end_dt = datetime.fromisoformat(end_date).date()
-                if event_date > end_dt:
-                    match = False
-            except (ValueError, TypeError):
-                pass  # Skip date filter if invalid
-
-        # Check participants
-        if participants:
-            if not any(p.lower() in [ep.lower() for ep in event.get("participants", [])] for p in participants):
-                match = False
-
-        # Check keyword in title or notes (matches if ANY word in keyword matches)
-        if keyword:
-            keyword_lower = keyword.lower().strip()
-            title_lower = event.get("title", "").lower().strip()
-            notes_lower = event.get("notes", "").lower().strip()
-            print(f"Matching keyword='{keyword_lower}' against title='{title_lower}'")  # debug
-
-            # Score by match quality (higher = better)
-            if keyword_lower == title_lower:
-                match_score = 100  # Exact title match
-            elif keyword_lower in title_lower:
-                match_score = 80  # Exact phrase in title
-            elif keyword_lower in notes_lower:
-                match_score = 60  # Exact phrase in notes
-            else:
-                # Check if any word in the keyword matches
-                keyword_words = [w for w in keyword_lower.split() if len(w) > 2]
-                matching_words = sum(1 for w in keyword_words if w in title_lower or w in notes_lower)
-                if matching_words > 0:
-                    match_score = 20 + (matching_words * 10)  # Partial match
-                else:
-                    match = False
-
-        if match:
-            results.append((event, match_score))
-
-    # Sort by match score (best matches first), then by event_id for consistency
-    results.sort(key=lambda x: (-x[1], x[0].get("event_id", 0)))
-    return [event for event, score in results]
-
-
 # -----------------------------
 # Agenda Suggestions for Recurring Meetings
 # -----------------------------
-def get_upcoming_recurring_meetings():
+def get_upcoming_recurring_meetings(username):
     """
     Get recurring meetings that are coming up (in the future)
     that have a past occurrence with notes.
@@ -1208,9 +1370,11 @@ def get_upcoming_recurring_meetings():
     now = datetime.now()
     print(f"[Agenda] Current time: {now}")  # debug
 
+    all_events = db.get_user_events(username)
+
     # Group events by recurrence_group
     recurrence_groups = {}
-    for event in calendar_events.values():
+    for event in all_events:
         group_id = event.get("recurrence_group")
         if group_id:
             if group_id not in recurrence_groups:
@@ -1335,7 +1499,7 @@ def extract_simple_agenda(notes):
 # -----------------------------
 # Scheduling Insights (inferred from calendar history)
 # -----------------------------
-def analyze_scheduling_patterns():
+def analyze_scheduling_patterns(username):
     """
     Analyze calendar events to infer user scheduling patterns.
     Detects implicit recurring patterns even for non-recurring events.
@@ -1345,7 +1509,8 @@ def analyze_scheduling_patterns():
     # Group events by title + day of week to detect recurring patterns
     title_day_patterns = {}  # {(title, day_of_week): [list of events]}
 
-    for event in calendar_events.values():
+    all_events = db.get_user_events(username)
+    for event in all_events:
         try:
             start_dt = datetime.strptime(event["start_time"], "%Y-%m-%d %H:%M:%S")
             day_of_week = day_names[start_dt.weekday()]
@@ -1387,21 +1552,12 @@ def analyze_scheduling_patterns():
     }
 
 
-def get_current_week_range():
-    """Get the start and end dates of the current week (Monday to Sunday)."""
-    now = datetime.now()
-    start_of_week = now - timedelta(days=now.weekday())
-    start_of_week = start_of_week.replace(hour=0, minute=0, second=0, microsecond=0)
-    end_of_week = start_of_week + timedelta(days=6, hours=23, minutes=59, seconds=59)
-    return start_of_week, end_of_week
-
-
-def get_scheduling_insight():
+def get_scheduling_insight(username):
     """
     Generate a contextual scheduling insight based on inferred patterns.
     Detects missing recurring meetings and suggests based on history.
     """
-    patterns = analyze_scheduling_patterns()
+    patterns = analyze_scheduling_patterns(username)
     now = datetime.now()
     current_day = now.strftime("%A")
     current_hour = now.hour
@@ -1453,7 +1609,8 @@ def get_scheduling_insight():
     # Check for upcoming meetings today
     today_str = now.strftime("%Y-%m-%d")
     upcoming_today = []
-    for event in calendar_events.values():
+    all_events = db.get_user_events(username)
+    for event in all_events:
         if event["start_time"].startswith(today_str):
             try:
                 event_time = datetime.strptime(event["start_time"], "%Y-%m-%d %H:%M:%S")
@@ -1486,3 +1643,11 @@ def get_scheduling_insight():
             return "Friday afternoon - good time for focused work"
         else:
             return "What would you like to add to your calendar?"
+        
+def get_current_week_range():
+    """Get the start and end dates of the current week (Monday to Sunday)."""
+    now = datetime.now()
+    start_of_week = now - timedelta(days=now.weekday())
+    start_of_week = start_of_week.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_of_week = start_of_week + timedelta(days=6, hours=23, minutes=59, seconds=59)
+    return start_of_week, end_of_week

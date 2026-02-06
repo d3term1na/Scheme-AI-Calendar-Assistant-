@@ -8,10 +8,116 @@
 body {
     font-family: 'Segoe UI', Arial, sans-serif;
     height: 100vh;
+    background: #f5f5f5;
+}
+body.logged-in {
     display: grid;
     grid-template-columns: 450px 1fr;
     grid-template-rows: auto 1fr;
-    background: #f5f5f5;
+}
+body:not(.logged-in) {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+/* Login/Register Form */
+.auth-container {
+    background: white;
+    padding: 40px;
+    border-radius: 12px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+    width: 100%;
+    max-width: 400px;
+}
+.auth-container h1 {
+    color: #4a90d9;
+    margin-bottom: 8px;
+    font-size: 1.8em;
+}
+.auth-container .subtitle {
+    color: #666;
+    margin-bottom: 25px;
+    font-size: 0.95em;
+}
+.auth-tabs {
+    display: flex;
+    margin-bottom: 25px;
+    border-bottom: 2px solid #eee;
+}
+.auth-tab {
+    flex: 1;
+    padding: 12px;
+    border: none;
+    background: none;
+    cursor: pointer;
+    font-size: 1em;
+    color: #666;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -2px;
+}
+.auth-tab.active {
+    color: #4a90d9;
+    border-bottom-color: #4a90d9;
+}
+.auth-form {
+    display: none;
+}
+.auth-form.active {
+    display: block;
+}
+.auth-form input {
+    width: 100%;
+    padding: 12px;
+    margin-bottom: 15px;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    font-size: 1em;
+}
+.auth-form input:focus {
+    outline: none;
+    border-color: #4a90d9;
+}
+.auth-form button {
+    width: 100%;
+    padding: 14px;
+    background: #4a90d9;
+    color: white;
+    border: none;
+    border-radius: 8px;
+    font-size: 1em;
+    cursor: pointer;
+    font-weight: 500;
+}
+.auth-form button:hover {
+    background: #3a7bc8;
+}
+.auth-form button:disabled {
+    background: #a0c4e8;
+    cursor: not-allowed;
+}
+.auth-error {
+    color: #dc3545;
+    background: #f8d7da;
+    padding: 10px;
+    border-radius: 6px;
+    margin-bottom: 15px;
+    font-size: 0.9em;
+    display: none;
+}
+.auth-error.visible {
+    display: block;
+}
+
+/* Main App (hidden when not logged in) */
+.main-app {
+    display: none;
+}
+body.logged-in .main-app {
+    display: contents;
+}
+body.logged-in .auth-container {
+    display: none;
 }
 
 /* Top title bar spanning full width */
@@ -23,6 +129,31 @@ body {
     color: white;
     font-size: 1.4em;
     font-weight: 600;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+.user-info {
+    display: flex;
+    align-items: center;
+    gap: 15px;
+    font-size: 0.75em;
+    font-weight: normal;
+}
+.user-info span {
+    opacity: 0.9;
+}
+#logoutBtn {
+    padding: 6px 14px;
+    background: rgba(255,255,255,0.2);
+    border: 1px solid rgba(255,255,255,0.3);
+    color: white;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.9em;
+}
+#logoutBtn:hover {
+    background: rgba(255,255,255,0.3);
 }
 
 /* Left column - Chat */
@@ -277,7 +408,7 @@ body {
 }
 
 .calendar-day {
-    min-height: 100px;
+    min-height: 140px;
     padding: 8px;
     border: 1px solid #eee;
     cursor: pointer;
@@ -321,11 +452,44 @@ body {
 </head>
 <body>
 
-<!-- Top Title Bar -->
-<div class="app-title">📅 AI Calendar Assistant</div>
+<!-- Auth Container (Login/Register) -->
+<div class="auth-container">
+    <h1>📅 AI Calendar</h1>
+    <p class="subtitle">Your intelligent scheduling assistant</p>
 
-<!-- Left Panel: Chat -->
-<div class="left-panel">
+    <div class="auth-tabs">
+        <button class="auth-tab active" data-tab="login">Login</button>
+        <button class="auth-tab" data-tab="register">Register</button>
+    </div>
+
+    <div class="auth-error" id="authError"></div>
+
+    <form class="auth-form active" id="loginForm">
+        <input type="text" id="loginUsername" placeholder="Username" required>
+        <input type="password" id="loginPassword" placeholder="Password" required>
+        <button type="submit">Login</button>
+    </form>
+
+    <form class="auth-form" id="registerForm">
+        <input type="text" id="registerUsername" placeholder="Username (min 3 chars)" required>
+        <input type="password" id="registerPassword" placeholder="Password (min 4 chars)" required>
+        <button type="submit">Create Account</button>
+    </form>
+</div>
+
+<!-- Main App (shown when logged in) -->
+<div class="main-app">
+    <!-- Top Title Bar -->
+    <div class="app-title">
+        <span>📅 AI Calendar Assistant</span>
+        <div class="user-info">
+            <span>Welcome, <strong id="currentUser"></strong></span>
+            <button id="logoutBtn">Logout</button>
+        </div>
+    </div>
+
+    <!-- Left Panel: Chat -->
+    <div class="left-panel">
     <div class="chat-container">
         <div id="chat"></div>
         <div id="suggestionContainer"></div>
@@ -361,8 +525,124 @@ body {
         <div class="calendar-days" id="calendarDays"></div>
     </div>
 </div>
+</div> <!-- End main-app -->
 
 <script>
+// ===================
+// Authentication
+// ===================
+let currentUsername = null;
+
+// Auth tab switching
+document.querySelectorAll('.auth-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+        document.querySelectorAll('.auth-tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.auth-form').forEach(f => f.classList.remove('active'));
+        tab.classList.add('active');
+        document.getElementById(tab.dataset.tab + 'Form').classList.add('active');
+        document.getElementById('authError').classList.remove('visible');
+    });
+});
+
+function showAuthError(message) {
+    const errorEl = document.getElementById('authError');
+    errorEl.textContent = message;
+    errorEl.classList.add('visible');
+}
+
+// Login form
+document.getElementById('loginForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const username = document.getElementById('loginUsername').value.trim();
+    const password = document.getElementById('loginPassword').value;
+
+    try {
+        const res = await fetch('/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, password })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+            showAuthError(data.detail || 'Login failed');
+            return;
+        }
+        setLoggedIn(data.username);
+    } catch (err) {
+        showAuthError('Could not connect to server');
+    }
+});
+
+// Register form
+document.getElementById('registerForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const username = document.getElementById('registerUsername').value.trim();
+    const password = document.getElementById('registerPassword').value;
+
+    try {
+        const res = await fetch('/register', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, password })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+            showAuthError(data.detail || 'Registration failed');
+            return;
+        }
+        setLoggedIn(data.username);
+    } catch (err) {
+        showAuthError('Could not connect to server');
+    }
+});
+
+// Logout
+document.getElementById('logoutBtn').addEventListener('click', async () => {
+    try {
+        await fetch('/logout', { method: 'POST' });
+    } catch (err) {}
+    setLoggedOut();
+});
+
+function setLoggedIn(username) {
+    currentUsername = username;
+    document.body.classList.add('logged-in');
+    document.getElementById('currentUser').textContent = username;
+    // Clear form inputs
+    document.getElementById('loginUsername').value = '';
+    document.getElementById('loginPassword').value = '';
+    document.getElementById('registerUsername').value = '';
+    document.getElementById('registerPassword').value = '';
+    document.getElementById('authError').classList.remove('visible');
+    // Initialize the app
+    initializeApp();
+}
+
+function setLoggedOut() {
+    currentUsername = null;
+    document.body.classList.remove('logged-in');
+    // Clear app state
+    events = {};
+    currentSuggestions = [];
+    dismissedSuggestions.clear();
+    chat.innerHTML = '';
+    renderCalendar();
+}
+
+// Check auth status on page load
+async function checkAuthStatus() {
+    try {
+        const res = await fetch('/me');
+        if (res.ok) {
+            const data = await res.json();
+            setLoggedIn(data.username);
+        }
+    } catch (err) {}
+}
+
+// ===================
+// Main App
+// ===================
 const chat = document.getElementById('chat');
 const messageInput = document.getElementById('message');
 const sendButton = document.getElementById('send');
@@ -549,9 +829,10 @@ function renderCalendar() {
         `;
     }
 
-    // Next month days
-    const remainingCells = 42 - (startingDay + totalDays);
-    for (let day = 1; day <= remainingCells; day++) {
+    // Next month days - only fill to complete the last row (don't add full greyed-out rows)
+    const totalCellsUsed = startingDay + totalDays;
+    const remainingInRow = (7 - (totalCellsUsed % 7)) % 7;
+    for (let day = 1; day <= remainingInRow; day++) {
         html += `<div class="calendar-day other-month"><div class="day-number">${day}</div></div>`;
     }
 
@@ -704,9 +985,9 @@ async function initializeApp() {
     fetchSchedulingInsight();
 }
 
-// Initial render and data load
+// Initial render and auth check
 renderCalendar();
-initializeApp();
+checkAuthStatus();
 </script>
 </body>
 </html>

@@ -1,22 +1,127 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException, Response
 from fastapi.staticfiles import StaticFiles
-from memory import conversation_memory, calendar_events
-from tools import create_event, query_event, update_event, delete_event, store_embedding, embed_model, retrieve_top_k, call_ollama, extract_event_details, extract_query_filters, extract_event_identifier, extract_update_details, extract_notes_details, extract_recurring_details, calculate_recurring_dates, classify_intent, get_upcoming_recurring_meetings, get_scheduling_insight, check_time_conflict, format_conflict_message, extract_bulk_operation_details, embed_existing_event_notes
+from fastapi.responses import JSONResponse
+import db
+from tools import store_event_embedding, embed_model, retrieve_top_k, call_ollama, extract_event_details, extract_query_filters, extract_event_identifier, extract_update_details, extract_notes_details, extract_recurring_details, calculate_recurring_dates, classify_intent, get_upcoming_recurring_meetings, get_scheduling_insight, check_time_conflict, format_conflict_message, extract_bulk_operation_details, embed_existing_event_notes, extract_recurring_operation_details, update_recurring_series, delete_recurring_series
 from datetime import datetime as dt, timedelta
+import bcrypt
+import uuid
+
+# In-memory session store {session_id: username}
+sessions = {}
 
 app = FastAPI()
 
-# Embed existing event notes into RAG on startup
-# This makes pre-populated sample event notes searchable
-embed_existing_event_notes()
+def get_current_user(request: Request) -> str:
+    """Get the current logged-in user from session cookie. Returns None if not logged in."""
+    session_id = request.cookies.get("session_id")
+    if session_id and session_id in sessions:
+        return sessions[session_id]
+    return None
+
+
+def require_auth(request: Request) -> str:
+    """Get the current user or raise 401 if not logged in."""
+    username = get_current_user(request)
+    if not username:
+        raise HTTPException(status_code=401, detail="Not logged in")
+    return username
+
+
+# -----------------------------
+# Authentication Endpoints
+# -----------------------------
+@app.post("/register")
+async def register(request: Request):
+    """Register a new user."""
+    body = await request.json()
+    username = body.get("username", "").strip()
+    password = body.get("password", "")
+
+    if not username or not password:
+        raise HTTPException(status_code=400, detail="Username and password required")
+
+    if len(username) < 3:
+        raise HTTPException(status_code=400, detail="Username must be at least 3 characters")
+
+    if len(password) < 4:
+        raise HTTPException(status_code=400, detail="Password must be at least 4 characters")
+
+    # Hash password and create user
+    password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+    success = db.create_user(username, password_hash)
+
+    if not success:
+        raise HTTPException(status_code=409, detail="Username already exists")
+
+    # Populate sample data for new user
+    db.populate_sample_data(username)
+    embed_existing_event_notes(username)
+
+    # Auto-login after registration
+    session_id = str(uuid.uuid4())
+    sessions[session_id] = username
+
+    response = JSONResponse({"message": "Registration successful", "username": username})
+    response.set_cookie(key="session_id", value=session_id, httponly=True)
+    return response
+
+
+@app.post("/login")
+async def login(request: Request):
+    """Login with username and password."""
+    body = await request.json()
+    username = body.get("username", "").strip()
+    password = body.get("password", "")
+
+    if not username or not password:
+        raise HTTPException(status_code=400, detail="Username and password required")
+
+    user = db.get_user(username)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    # Verify password
+    if not bcrypt.checkpw(password.encode(), user["password_hash"].encode()):
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    # Create session
+    session_id = str(uuid.uuid4())
+    sessions[session_id] = username
+
+    response = JSONResponse({"message": "Login successful", "username": username})
+    response.set_cookie(key="session_id", value=session_id, httponly=True)
+    return response
+
+
+@app.post("/logout")
+async def logout(request: Request):
+    """Logout the current user."""
+    session_id = request.cookies.get("session_id")
+    if session_id and session_id in sessions:
+        del sessions[session_id]
+
+    response = JSONResponse({"message": "Logged out"})
+    response.delete_cookie("session_id")
+    return response
+
+
+@app.get("/me")
+async def get_current_user_info(request: Request):
+    """Get the current logged-in user info."""
+    username = get_current_user(request)
+    if not username:
+        raise HTTPException(status_code=401, detail="Not logged in")
+    return {"username": username}
 
 # -----------------------------
 # Agenda Suggestions Endpoint
 # -----------------------------
 @app.get("/agenda-suggestions")
-async def get_agenda_suggestions():
+async def get_agenda_suggestions(request: Request):
     """Get agenda suggestions for upcoming recurring meetings based on past notes."""
-    suggestions = get_upcoming_recurring_meetings()
+    username = require_auth(request)
+    suggestions = get_upcoming_recurring_meetings(username)
 
     # Format for frontend consumption
     formatted = []
@@ -34,15 +139,17 @@ async def get_agenda_suggestions():
 
 
 @app.get("/events")
-async def get_all_events():
+async def get_all_events(request: Request):
     """Get all calendar events for initial page load."""
-    return {"events": list(calendar_events.values())}
+    username = require_auth(request)
+    return {"events": db.get_user_events(username)}
 
 
 @app.get("/scheduling-insight")
-async def get_insight():
+async def get_insight(request: Request):
     """Get a contextual scheduling insight based on user's calendar patterns."""
-    insight = get_scheduling_insight()
+    username = require_auth(request)
+    insight = get_scheduling_insight(username)
     return {"insight": insight}
 
 
@@ -51,11 +158,12 @@ async def get_insight():
 # -----------------------------
 @app.post("/chat")
 async def chat_endpoint(request: Request):
+    username = require_auth(request)
     body = await request.json()
     conversation_id = body.get("conversation_id", "default")
     user_message = body.get("message", "")
 
-    reply, metadata = agent_process(user_message, conversation_id)
+    reply, metadata = agent_process(username, user_message, conversation_id)
     print("Sending reply:", reply)  # debug
     return {
         "reply": reply,
@@ -68,8 +176,9 @@ app.mount("/", StaticFiles(directory="frontend", html=True), name="frontend")
 # -----------------------------
 # Agent logic
 # -----------------------------
-def agent_process(user_message, conversation_id="default"):
-    history = conversation_memory.get(conversation_id, [])
+def agent_process(username, user_message, conversation_id="default"):
+    # Get conversation history from database
+    history = db.get_conversation_history(username, conversation_id)
     history.append({"user": user_message})
 
     reply = ""
@@ -83,7 +192,7 @@ def agent_process(user_message, conversation_id="default"):
         details = extract_event_details(user_message)
 
         # Check for time conflicts before creating
-        conflicts = check_time_conflict(details["start_time"], details["end_time"])
+        conflicts = check_time_conflict(username, details["start_time"], details["end_time"])
         if conflicts:
             conflict_msg = format_conflict_message(conflicts)
             # Format the requested time nicely
@@ -97,7 +206,8 @@ def agent_process(user_message, conversation_id="default"):
             metadata["conflict"] = True
             metadata["conflicting_events"] = conflicts
         else:
-            event = create_event(
+            event = db.create_event(
+                username=username,
                 title=details["title"],
                 start_time=details["start_time"],
                 end_time=details["end_time"],
@@ -119,7 +229,7 @@ def agent_process(user_message, conversation_id="default"):
             # Store richer event info in RAG
             participants_info = f" with {', '.join(event['participants'])}" if event.get('participants') else ""
             content = f"Event: {event['title']}{participants_info} scheduled for {event['start_time']}"
-            store_embedding(content, doc_type="event")
+            store_event_embedding(event["event_id"], content)
     elif intent == "CREATE_RECURRING":
         details = extract_recurring_details(user_message)
         print(f"Recurring details: {details}")  # debug
@@ -152,7 +262,7 @@ def agent_process(user_message, conversation_id="default"):
                 end_time_str = end_dt.strftime("%Y-%m-%d %H:%M:%S")
 
                 # Check for conflicts
-                conflicts = check_time_conflict(start_time_str, end_time_str)
+                conflicts = check_time_conflict(username, start_time_str, end_time_str)
                 if conflicts:
                     skipped_dates.append({
                         "date": event_date,
@@ -160,7 +270,8 @@ def agent_process(user_message, conversation_id="default"):
                     })
                     continue  # Skip this occurrence
 
-                event = create_event(
+                event = db.create_event(
+                    username=username,
                     title=details["title"],
                     start_time=start_time_str,
                     end_time=end_time_str,
@@ -172,7 +283,7 @@ def agent_process(user_message, conversation_id="default"):
                 # Store in RAG
                 participants_info = f" with {', '.join(event['participants'])}" if event.get('participants') else ""
                 content = f"Event: {event['title']}{participants_info} scheduled for {event['start_time']}"
-                store_embedding(content, doc_type="event")
+                store_event_embedding(event["event_id"], content)
 
             # Build natural language response
             num_events = len(created_events)
@@ -218,10 +329,11 @@ def agent_process(user_message, conversation_id="default"):
 
                 metadata["events_created"] = created_events
     elif intent == "DELETE":
-        print(f"DELETE - All calendar events: {list(calendar_events.values())}")  # debug
+        print(f"DELETE - Getting events for user: {username}")  # debug
         filters = extract_query_filters(user_message)
         print(f"DELETE - Extracted filters: {filters}")  # debug
-        events = query_event(
+        events = db.query_events(
+            username=username,
             start_date=filters["start_date"],
             end_date=filters["end_date"],
             participants=filters["participants"],
@@ -231,7 +343,8 @@ def agent_process(user_message, conversation_id="default"):
         # Fallback: if no events found with keyword, try without keyword
         if not events and filters["keyword"]:
             print("DELETE - Trying fallback without keyword filter...")  # debug
-            events = query_event(
+            events = db.query_events(
+                username=username,
                 start_date=filters["start_date"],
                 end_date=filters["end_date"],
                 participants=filters["participants"],
@@ -241,7 +354,8 @@ def agent_process(user_message, conversation_id="default"):
         # Fallback: if still no events, try without date filter
         if not events and (filters["start_date"] or filters["end_date"]):
             print("DELETE - Trying fallback without date filter...")  # debug
-            events = query_event(
+            events = db.query_events(
+                username=username,
                 participants=filters["participants"],
                 keyword=filters["keyword"]
             )
@@ -249,11 +363,11 @@ def agent_process(user_message, conversation_id="default"):
         # Fallback: get all events if still none found
         if not events:
             print("DELETE - Trying fallback to get all events...")  # debug
-            events = query_event()
+            events = db.query_events(username=username)
             print(f"DELETE - Total events in calendar: {len(events)}")  # debug
 
         if events:
-            deleted = delete_event(events[0]["event_id"])
+            deleted = db.delete_event(events[0]["event_id"])
             reply = f"Deleted event: {deleted['title']} ({deleted['start_time']})"
             metadata["events_deleted"] = [deleted]
         else:
@@ -261,7 +375,8 @@ def agent_process(user_message, conversation_id="default"):
     elif intent == "QUERY":
         filters = extract_query_filters(user_message)
         print(f"QUERY - Extracted filters: {filters}")  # debug
-        events = query_event(
+        events = db.query_events(
+            username=username,
             start_date=filters["start_date"],
             end_date=filters["end_date"],
             participants=filters["participants"],
@@ -304,10 +419,11 @@ def agent_process(user_message, conversation_id="default"):
         else:
             reply = "No events found matching your criteria."
     elif intent == "UPDATE":
-        print(f"UPDATE - All calendar events: {list(calendar_events.values())}")  # debug
+        print(f"UPDATE - Getting events for user: {username}")  # debug
         identifier = extract_event_identifier(user_message)
         print(f"UPDATE - Extracted identifier: {identifier}")  # debug
-        events = query_event(
+        events = db.query_events(
+            username=username,
             start_date=identifier["current_date"],
             end_date=identifier["current_date"],
             participants=identifier["participants"],
@@ -317,7 +433,8 @@ def agent_process(user_message, conversation_id="default"):
         # Fallback: if no events found with keyword, try without keyword
         if not events and identifier["keyword"]:
             print("UPDATE - Trying fallback without keyword filter...")  # debug
-            events = query_event(
+            events = db.query_events(
+                username=username,
                 start_date=identifier["current_date"],
                 end_date=identifier["current_date"],
                 participants=identifier["participants"],
@@ -328,7 +445,8 @@ def agent_process(user_message, conversation_id="default"):
         # Fallback: if still no events, try without date filter
         if not events and identifier["current_date"]:
             print("UPDATE - Trying fallback without date filter...")  # debug
-            events = query_event(
+            events = db.query_events(
+                username=username,
                 participants=identifier["participants"],
                 keyword=identifier["keyword"]
             )
@@ -337,7 +455,7 @@ def agent_process(user_message, conversation_id="default"):
         # Fallback: get all events if still none found
         if not events:
             print("UPDATE - Trying fallback to get all events...")  # debug
-            events = query_event()
+            events = db.query_events(username=username)
             print(f"UPDATE - Total events in calendar: {len(events)}")  # debug
 
         if events:
@@ -367,7 +485,7 @@ def agent_process(user_message, conversation_id="default"):
                 new_end = updates.get("end_time", event["end_time"])
 
                 # Exclude the current event from conflict check (don't conflict with itself)
-                conflicts = check_time_conflict(new_start, new_end, exclude_event_id=event["event_id"])
+                conflicts = check_time_conflict(username, new_start, new_end, exclude_event_id=event["event_id"])
 
                 if conflicts:
                     conflict_msg = format_conflict_message(conflicts)
@@ -383,7 +501,7 @@ def agent_process(user_message, conversation_id="default"):
                     metadata["conflicting_events"] = conflicts
                 else:
                     # No conflicts, proceed with update
-                    updated = update_event(event["event_id"], **updates)
+                    updated = db.update_event(event["event_id"], **updates)
                     # Build natural language response
                     change_parts = []
                     if "start_time" in updates:
@@ -406,7 +524,7 @@ def agent_process(user_message, conversation_id="default"):
                     metadata["events_updated"] = [updated]
             elif updates:
                 # No time change, just update other fields (no conflict check needed)
-                updated = update_event(event["event_id"], **updates)
+                updated = db.update_event(event["event_id"], **updates)
                 change_parts = []
                 if "title" in updates:
                     change_parts.append(f"renamed it to '{updates['title']}'")
@@ -428,7 +546,8 @@ def agent_process(user_message, conversation_id="default"):
         print(f"ADD_NOTES - Searching for event_date: {notes_details['event_date']}, keyword: {notes_details['keyword']}")  # debug
 
         # Find the event to add notes to
-        events = query_event(
+        events = db.query_events(
+            username=username,
             start_date=notes_details["event_date"],
             end_date=notes_details["event_date"],
             participants=notes_details["participants"],
@@ -440,14 +559,15 @@ def agent_process(user_message, conversation_id="default"):
 
         # Fallback: try without date filter
         if not events and notes_details["keyword"]:
-            events = query_event(
+            events = db.query_events(
+                username=username,
                 participants=notes_details["participants"],
                 keyword=notes_details["keyword"]
             )
 
         # Fallback: get all events if still none found
         if not events:
-            events = query_event()
+            events = db.query_events(username=username)
 
         if events and notes_details["notes"]:
             event = events[0]
@@ -458,12 +578,12 @@ def agent_process(user_message, conversation_id="default"):
             else:
                 new_notes = notes_details["notes"]
 
-            updated = update_event(event["event_id"], notes=new_notes)
+            updated = db.update_event(event["event_id"], notes=new_notes)
             reply = f"Added notes to '{event['title']}': \"{notes_details['notes']}\""
             metadata["events_updated"] = [updated]
             # Store notes in RAG for future questions
             notes_content = f"Meeting '{event['title']}' on {event['start_time']}: {notes_details['notes']}"
-            store_embedding(notes_content, doc_type="meeting_notes")
+            store_event_embedding(event["event_id"], notes_content)
         elif not notes_details["notes"]:
             reply = "I couldn't understand what notes you want to add. Please try again."
         else:
@@ -478,7 +598,7 @@ def agent_process(user_message, conversation_id="default"):
             reply = "I couldn't understand which dates you want to move events between. Please specify the source and destination dates."
         else:
             # Find all events on the source date
-            events_to_move = query_event(start_date=source_date, end_date=source_date)
+            events_to_move = db.query_events(username=username, start_date=source_date, end_date=source_date)
             print(f"BULK_RESCHEDULE - Found {len(events_to_move)} events on {source_date}")  # debug
 
             if not events_to_move:
@@ -508,7 +628,7 @@ def agent_process(user_message, conversation_id="default"):
                         new_end_str = new_end.strftime("%Y-%m-%d %H:%M:%S")
 
                         # Check for conflicts on the destination date
-                        conflicts = check_time_conflict(new_start_str, new_end_str, exclude_event_id=event["event_id"])
+                        conflicts = check_time_conflict(username, new_start_str, new_end_str, exclude_event_id=event["event_id"])
 
                         if conflicts:
                             conflict_events.append({
@@ -517,7 +637,7 @@ def agent_process(user_message, conversation_id="default"):
                             })
                         else:
                             # Move the event
-                            updated = update_event(event["event_id"], start_time=new_start_str, end_time=new_end_str)
+                            updated = db.update_event(event["event_id"], start_time=new_start_str, end_time=new_end_str)
                             moved_events.append(updated)
                     except Exception as e:
                         print(f"BULK_RESCHEDULE - Error moving event {event['title']}: {e}")
@@ -559,7 +679,7 @@ def agent_process(user_message, conversation_id="default"):
             reply = "I couldn't understand which date you want to cancel events on. Please specify the date."
         else:
             # Find all events on the source date
-            events_to_cancel = query_event(start_date=source_date, end_date=source_date)
+            events_to_cancel = db.query_events(username=username, start_date=source_date, end_date=source_date)
             print(f"BULK_CANCEL - Found {len(events_to_cancel)} events on {source_date}")  # debug
 
             if not events_to_cancel:
@@ -572,7 +692,7 @@ def agent_process(user_message, conversation_id="default"):
             else:
                 deleted_events = []
                 for event in events_to_cancel:
-                    deleted = delete_event(event["event_id"])
+                    deleted = db.delete_event(event["event_id"])
                     if deleted:
                         deleted_events.append(deleted)
 
@@ -589,6 +709,63 @@ def agent_process(user_message, conversation_id="default"):
                 else:
                     reply = f"Done! I've cancelled {len(deleted_events)} events on {source_str}: {', '.join(event_names)}."
                 metadata["events_deleted"] = deleted_events
+    elif intent == "UPDATE_RECURRING":
+        # Update all events in a recurring series
+        recurring_details = extract_recurring_operation_details(user_message)
+        series_keyword = recurring_details.get("series_keyword")
+        print(f"UPDATE_RECURRING - series_keyword: {series_keyword}, details: {recurring_details}")  # debug
+
+        if not series_keyword:
+            reply = "I couldn't understand which recurring series you want to update. Please specify the meeting name."
+        else:
+            result = update_recurring_series(
+                username=username,
+                series_keyword=series_keyword,
+                new_title=recurring_details.get("new_title"),
+                new_day=recurring_details.get("new_day"),
+                new_time=recurring_details.get("new_time")
+            )
+
+            if result.get("error"):
+                reply = result["error"]
+            elif result["count"] == 0:
+                reply = f"No recurring events found matching '{series_keyword}'."
+            else:
+                # Build a descriptive response
+                change_parts = []
+                if recurring_details.get("new_title"):
+                    change_parts.append(f"renamed to '{recurring_details['new_title']}'")
+                if recurring_details.get("new_day"):
+                    change_parts.append(f"moved to {recurring_details['new_day'].capitalize()}s")
+                if recurring_details.get("new_time"):
+                    try:
+                        time_parsed = dt.strptime(recurring_details['new_time'], "%H:%M:%S")
+                        time_formatted = time_parsed.strftime("%I:%M %p").lstrip("0")
+                        change_parts.append(f"rescheduled to {time_formatted}")
+                    except:
+                        change_parts.append(f"rescheduled to {recurring_details['new_time']}")
+
+                changes_str = " and ".join(change_parts) if change_parts else "updated"
+                reply = f"Done! I've {changes_str} all {result['count']} events in the '{series_keyword}' series."
+                metadata["events_updated"] = result["events"]
+    elif intent == "DELETE_RECURRING":
+        # Delete all events in a recurring series
+        recurring_details = extract_recurring_operation_details(user_message)
+        series_keyword = recurring_details.get("series_keyword")
+        print(f"DELETE_RECURRING - series_keyword: {series_keyword}")  # debug
+
+        if not series_keyword:
+            reply = "I couldn't understand which recurring series you want to delete. Please specify the meeting name."
+        else:
+            result = delete_recurring_series(username, series_keyword)
+
+            if result.get("error"):
+                reply = result["error"]
+            elif result["count"] == 0:
+                reply = f"No recurring events found matching '{series_keyword}'."
+            else:
+                reply = f"Done! I've deleted all {result['count']} events in the '{series_keyword}' series."
+                metadata["events_deleted"] = result["deleted"]
     else:  # GENERAL or fallback
         # First, try to find relevant calendar events with notes
         # Extract filters to find specific events the user is asking about
@@ -596,7 +773,8 @@ def agent_process(user_message, conversation_id="default"):
         print(f"GENERAL - Extracted filters: {filters}")  # debug
 
         # Search for events matching the query
-        relevant_events = query_event(
+        relevant_events = db.query_events(
+            username=username,
             start_date=filters["start_date"],
             end_date=filters["end_date"],
             participants=filters["participants"],
@@ -619,7 +797,7 @@ def agent_process(user_message, conversation_id="default"):
 
         # Also get RAG context
         query_vec = embed_model.encode(user_message)
-        top_docs = retrieve_top_k(query_vec, k=3)
+        top_docs = retrieve_top_k(username, query_vec, k=3)
 
         # Combine event notes context with RAG context
         all_context = event_context + top_docs
@@ -629,8 +807,8 @@ def agent_process(user_message, conversation_id="default"):
         reply = call_ollama(user_message, context_text)
         metadata["retrieved_docs"] = top_docs
         metadata["relevant_events"] = relevant_events
-        store_embedding(f"User: {user_message}", doc_type="conversation")
-    history.append({"agent": reply})
-    conversation_memory[conversation_id] = history
+
+    # Save conversation to database
+    db.save_conversation_message(username, conversation_id, user_message, reply)
 
     return reply, metadata
