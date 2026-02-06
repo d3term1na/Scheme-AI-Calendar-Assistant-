@@ -25,38 +25,36 @@ embed_model = SentenceTransformer('all-MiniLM-L6-v2')
 
 def extract_timezone_from_message(user_message):
     """Use LLM to detect if a timezone is mentioned in the user message."""
-    extraction_prompt = f"""Analyze this message and determine if a timezone is EXPLICITLY mentioned.
+    # Pre-check: only call LLM if a known timezone keyword exists in the message
+    tz_keywords = [
+        "pst", "pdt", "est", "edt", "cst", "cdt", "mst", "mdt",
+        "gmt", "utc", "bst", "cet", "ist", "jst", "sgt", "aest", "hkt", "kst",
+        "pacific time", "eastern time", "central time", "mountain time",
+        "singapore time", "tokyo time", "london time",
+    ]
+    msg_lower = user_message.lower()
+    if not any(kw in msg_lower for kw in tz_keywords):
+        print("No timezone keyword found in message, skipping LLM call")
+        return None
 
-IMPORTANT: "am" and "pm" in times like "6pm", "9am", "3:00pm" are NOT timezones! They are just time indicators.
-Only return a timezone if the user EXPLICITLY mentions a timezone like "PST", "EST", "Pacific time", etc.
+    extraction_prompt = f"""Does this message contain an EXPLICIT timezone abbreviation or name?
 
-Common timezone abbreviations and their IANA names:
-- PST/PDT/Pacific time -> America/Los_Angeles
-- EST/EDT/Eastern time -> America/New_York
-- CST/CDT/Central time -> America/Chicago
-- MST/MDT/Mountain time -> America/Denver
-- GMT/UTC -> UTC
-- BST/London -> Europe/London
-- CET/Paris/Berlin -> Europe/Paris
-- IST/India -> Asia/Kolkata
-- JST/Tokyo -> Asia/Tokyo
-- SGT/Singapore -> Asia/Singapore
-- AEST/Sydney -> Australia/Sydney
-- HKT/Hong Kong -> Asia/Hong_Kong
-- KST/Seoul -> Asia/Seoul
+Rules:
+- "am" and "pm" are NOT timezones. "7pm", "9am", "3:00pm" have NO timezone.
+- "Sun", "Mon", "Tue" etc. are days of the week, NOT timezones.
+- Only these count as timezones: PST, PDT, EST, EDT, CST, CDT, MST, MDT, GMT, UTC, BST, CET, IST, JST, SGT, AEST, HKT, KST, or full names like "Pacific time", "Eastern time", "Singapore time".
 
 Examples:
-- "meeting at 6pm" -> null (no timezone, just a time)
+- "Reschedule all standups to Sun 7pm" -> null
+- "meeting at 6pm" -> null
+- "Friday 6pm" -> null
 - "meeting at 3pm PST" -> America/Los_Angeles
 - "call at 9am Eastern" -> America/New_York
-- "Friday 6pm" -> null (no timezone)
-
-If a timezone IS explicitly mentioned, return the IANA timezone name.
-If NO timezone is mentioned, return "null".
+- "schedule for 2pm SGT" -> Asia/Singapore
 
 Message: {user_message}
 
-Return ONLY the IANA timezone name or "null" (no quotes, no explanation):"""
+Return ONLY "null" or the IANA timezone name. Nothing else:"""
 
     payload = {
         "model": MODEL_NAME,
@@ -187,9 +185,18 @@ def convert_time_to_local_tz(time_str, source_tz_name):
 
         # Convert using the full datetime function
         converted = convert_to_local_tz(full_datetime, source_tz_name)
-
+        offset = 0
+        if datetime.strptime(converted, "%Y-%m-%d %H:%M:%S").date() < datetime.strptime(full_datetime, "%Y-%m-%d %H:%M:%S").date():
+            offset = -1
+        elif datetime.strptime(converted, "%Y-%m-%d %H:%M:%S").date() > datetime.strptime(full_datetime, "%Y-%m-%d %H:%M:%S").date():
+            offset = 1
         # Extract just the time portion
-        return converted.split(" ")[1] if converted else time_str
+        final_str = ""
+        if converted:
+            final_str = converted.split(" ")[1]
+        else:
+            final_str = time_str
+        return final_str, offset
     except Exception as e:
         print(f"Time timezone conversion error: {e}")
         return time_str
@@ -324,12 +331,16 @@ Important:
 - "schedule a meeting tomorrow" = CREATE (single event, no recurrence)
 - "Delete the standup" or "Cancel tomorrow's meeting" = DELETE (single event)
 - "Remove ALL my standups" or "Delete all Team Meetings" = DELETE_RECURRING (recurring series)
-- "Move my meeting to 3pm" = UPDATE (single event)
-- "Change ALL my standups to 10am" or "Rename all Project Reviews" = UPDATE_RECURRING (recurring series)
+- "Move my meeting to 3pm" or "Reschedule Product Meeting to Feb 10" = UPDATE (single event)
+- "Reschedule my dinner with Charlie to tomorrow 8am" = UPDATE (single event, no "all")
+- "Reschedule the Team Standup on Feb 11 to tomorrow" = UPDATE (targets ONE specific occurrence by date)
+- "Change ALL my standups to 10am" or "Rename all Project Reviews" = UPDATE_RECURRING (recurring series, must say "all")
 - "Push everything today to tomorrow" = BULK_RESCHEDULE (date-based)
 - "Cancel everything today" = BULK_CANCEL (date-based)
 - "Add notes to my meeting..." or "We discussed X" (STATEMENT) = ADD_NOTES intent
 - "What did we discuss?" (QUESTION about past meetings) = GENERAL intent
+
+KEY RULE: UPDATE_RECURRING and DELETE_RECURRING require the word "all" (e.g., "all my standups", "all Project Reviews"). Without "all", it is UPDATE or DELETE (single event). Also, if the user mentions a SPECIFIC DATE (like "on Feb 11", "tomorrow"), it is UPDATE or DELETE, NOT UPDATE_RECURRING or DELETE_RECURRING.
 
 Message: {user_message}
 
@@ -351,11 +362,22 @@ Respond with ONLY the category name:"""
 
         # Extract just the intent keyword if there's extra text
         # Check longer intents first to avoid partial matches
+        classified = "GENERAL"
         for intent in ["CREATE_RECURRING", "UPDATE_RECURRING", "DELETE_RECURRING", "BULK_RESCHEDULE", "BULK_CANCEL", "CREATE", "DELETE", "QUERY", "UPDATE", "ADD_NOTES", "GENERAL"]:
             if intent in response:
-                return intent
+                classified = intent
+                break
 
-        return "GENERAL"
+        # Guard: UPDATE_RECURRING/DELETE_RECURRING require "all" in the message
+        msg_lower = user_message.lower()
+        if classified == "UPDATE_RECURRING" and "all" not in msg_lower:
+            print(f"Intent guard: {classified} -> UPDATE (no 'all' in message)")
+            classified = "UPDATE"
+        elif classified == "DELETE_RECURRING" and "all" not in msg_lower:
+            print(f"Intent guard: {classified} -> DELETE (no 'all' in message)")
+            classified = "DELETE"
+
+        return classified
     except Exception as e:
         print("Intent classification error:", e)
         return "GENERAL"
@@ -403,7 +425,7 @@ JSON:"""
             response_text = json_match.group(1)
 
         details = json.loads(response_text.strip())
-
+        
         # Validate required fields
         if not all(k in details for k in ["title", "start_time", "end_time"]):
             raise ValueError("Missing required fields")
@@ -458,25 +480,37 @@ def extract_query_filters(user_message):
     """Use LLM to extract query/filter criteria from natural language."""
     current_year = datetime.now().year
     tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+    # Calculate next week's Monday and Sunday
+    now = datetime.now()
+    days_until_next_monday = (7 - now.weekday()) % 7
+    if days_until_next_monday == 0:
+        days_until_next_monday = 7
+    next_monday = (now + timedelta(days=days_until_next_monday)).strftime("%Y-%m-%d")
+    next_sunday = (now + timedelta(days=days_until_next_monday + 6)).strftime("%Y-%m-%d")
+
     extraction_prompt = f"""Extract search filters from this message. Today is {today}, tomorrow is {tomorrow}.
 
 Return ONLY valid JSON with these fields (use null if NOT EXPLICITLY specified):
 - start_date: string in "YYYY-MM-DD" format or null (start of date range)
 - end_date: string in "YYYY-MM-DD" format or null (end of date range)
 - participants: array of strings (names mentioned) or null
-- keyword: string (event title/topic to search for) or null
+- keyword: string (specific event title/topic to search for) or null
 
 IMPORTANT:
 - "today" = {today}
 - "tomorrow" = {tomorrow}
+- "next week" = start_date: "{next_monday}", end_date: "{next_sunday}"
 - "Feb 2" or "February 2" = "{current_year}-02-02"
 - If no date is mentioned, use null for both start_date and end_date
+- "keyword" is ONLY for specific event names like "Project Review", "Standup", "Lunch with Bob"
+- Generic words like "events", "meetings", "calendar", "schedule" are NOT keywords — use null
 
 Examples:
 - "Who is the Project Review tomorrow with?" -> {{"start_date": "{tomorrow}", "end_date": "{tomorrow}", "participants": null, "keyword": "Project Review"}}
 - "Who was the Morning Planning with on Feb 2?" -> {{"start_date": "{current_year}-02-02", "end_date": "{current_year}-02-02", "participants": null, "keyword": "Morning Planning"}}
 - "What's on my calendar today?" -> {{"start_date": "{today}", "end_date": "{today}", "participants": null, "keyword": null}}
 - "what's on my calendar?" -> {{"start_date": null, "end_date": null, "participants": null, "keyword": null}}
+- "What are my events next week?" -> {{"start_date": "{next_monday}", "end_date": "{next_sunday}", "participants": null, "keyword": null}}
 - "list events with Alice" -> {{"start_date": null, "end_date": null, "participants": ["Alice"], "keyword": null}}
 
 Message: {user_message}
@@ -546,6 +580,7 @@ IMPORTANT: Distinguish between CURRENT event info vs NEW values:
 - "reschedule my meeting to 3pm tomorrow" -> keyword="meeting", current_date=null (tomorrow is the NEW time)
 - "move tomorrow's standup to Friday" -> keyword="standup", current_date=tomorrow (tomorrow is CURRENT, Friday is NEW)
 - "change my 2pm meeting to 4pm" -> keyword="meeting", current_date=null (no current DATE specified, just time)
+- "change my product meeting to 9 feb 5pm" -> keyword="product meeting", current_date=null (9 feb 5pm is NEW)
 - "rename the team meeting to Sprint Review" -> keyword="team meeting", current_date=null
 
 Return ONLY valid JSON:
@@ -590,7 +625,9 @@ def extract_update_details(user_message):
     """Use LLM to extract what changes the user wants to make to an event."""
     extraction_prompt = f"""Extract the UPDATE details from this message. Today is {today} (current time: {now.strftime("%H:%M")}).
 
-The user wants to modify an existing event. Extract ONLY the fields they want to CHANGE (use null for fields not being changed):
+The user wants to modify an existing event. Extract ONLY the NEW values they want to CHANGE TO (use null for fields not being changed).
+
+CRITICAL: When the message has TWO dates (e.g., "on 11 Feb to 13 Feb 8pm"), the date BEFORE "to" identifies WHICH event, the date AFTER "to" is the NEW date/time. Only return the NEW date/time.
 
 Return ONLY valid JSON with these fields:
 - new_title: string or null (new event name if changing)
@@ -608,6 +645,7 @@ Examples:
 - "rename my meeting to Project Review" -> {{"new_title": "Project Review", ...rest null}}
 - "add Bob to the meeting" -> {{"add_participants": ["Bob"], ...rest null}}
 - "move my 2pm meeting to Friday at 4pm" -> {{"new_start_time": "Friday 16:00:00", "new_end_time": "Friday 16:45:00", ...rest null}}
+- "Reschedule the Team Standup on 11 Feb to 13 Feb 8pm" -> {{"new_start_time": "2026-02-13 20:00:00", "new_end_time": "2026-02-13 20:45:00", ...rest null}} (13 Feb is the NEW date, 11 Feb is ignored)
 
 Message: {user_message}
 
@@ -633,6 +671,7 @@ JSON:"""
             response_text = json_match.group(1)
 
         details = json.loads(response_text.strip())
+        print(f"UPDATE details LLM response: {details}")  # debug
 
         # Normalize datetime values to ensure proper format
         # Pass the original user_message so day names like "Saturday" can be detected
@@ -773,7 +812,7 @@ IMPORTANT:
 
 Examples:
 - "Set a progress meeting for every friday 5pm" -> {{"title": "Progress Meeting", "time": "17:00:00", "duration_minutes": 45, "participants": [], "frequency": "weekly", "day_of_week": "friday", "occurrence_limit": 4, "end_date": null}}
-- "Weekly standup with the team every Monday 9am for 3 weeks" -> {{"title": "Weekly Standup", "time": "09:00:00", "duration_minutes": 45, "participants": [], "frequency": "weekly", "day_of_week": "monday", "occurrence_limit": 3, "end_date": null}}
+- "Weekly standup with Bob and Charlie every Monday 9am for 3 weeks" -> {{"title": "Weekly Standup", "time": "09:00:00", "duration_minutes": 45, "participants": ["Bob", "Charlie"], "frequency": "weekly", "day_of_week": "monday", "occurrence_limit": 3, "end_date": null}}
 - "Daily check-in at 10am till end of month" -> {{"title": "Daily Check-in", "time": "10:00:00", "duration_minutes": 45, "participants": [], "frequency": "daily", "day_of_week": null, "occurrence_limit": null, "end_date": "end_of_month"}}
 
 Message: {user_message}
@@ -802,13 +841,20 @@ JSON:"""
 
         # Get time value
         time_value = details.get("time") or "09:00:00"
-
+        day_of_event = details.get("day_of_week")
         # Check for timezone in user message and convert to local (SGT)
         source_tz = extract_timezone_from_message(user_message)
         if source_tz:
+            days_of_week = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
             print(f"Detected timezone: {source_tz}, converting time to SGT")
-            time_value = convert_time_to_local_tz(time_value, source_tz)
-
+            time_value, offset = convert_time_to_local_tz(time_value, source_tz)
+            if offset == -1 and details.get("day_of_week") == "monday":
+                day_of_event = "sunday"
+            elif offset == 1 and details.get("day_of_week") == "sunday":
+                day_of_event = "monday"
+            else:
+                day_of_event = days_of_week[days_of_week.index(details.get("day_of_week")) + offset]
+                
         # Use 'or' to handle None values from LLM returning null
         return {
             "title": details.get("title") or "Recurring Event",
@@ -816,7 +862,7 @@ JSON:"""
             "duration_minutes": details.get("duration_minutes") or 45,
             "participants": details.get("participants") or [],
             "frequency": details.get("frequency") or "weekly",
-            "day_of_week": details.get("day_of_week"),
+            "day_of_week": day_of_event,
             "occurrence_limit": details.get("occurrence_limit") or 4,  # Default to 4 if null/None
             "end_date": details.get("end_date")
         }
@@ -885,7 +931,9 @@ def calculate_recurring_dates(details):
 
         # Find the next occurrence of that day
         days_ahead = target_day - current_date.weekday()
-        if days_ahead <= 0:  # Target day already happened this week
+        if days_ahead <= -1:  # Target day already happened this week
+            days_ahead += 7
+        elif days_ahead == 0 and datetime.now().time() > datetime.strptime(details.get("time"), '%H:%M:%S').time():
             days_ahead += 7
         next_date = current_date + timedelta(days=days_ahead)
 
@@ -1027,10 +1075,13 @@ Return ONLY valid JSON with these fields:
 - new_title: string or null (new name if renaming)
 - new_day: string or null (new day of week if rescheduling, lowercase)
 - new_time: string in "HH:MM:SS" format or null (new time if rescheduling)
+- new_participants: array of strings (names mentioned, empty array if none)
+IMPORTANT: Use the EXACT event name from the user's message for series_keyword. Do NOT rename or map to other event names.
 
-IMPORTANT:
+series_keyword examples:
 - "all my standups" -> series_keyword: "standup"
 - "all Project Reviews" -> series_keyword: "Project Review"
+- "all Budget Reviews" -> series_keyword: "Budget Review"
 - "all my Morning Plannings" -> series_keyword: "Morning Planning"
 - "all 1:1s" or "all one-on-ones" -> series_keyword: "1:1"
 
@@ -1040,12 +1091,13 @@ TIME CONVERSION (use 24-hour format):
 - Special: "12pm" (noon) -> "12:00:00", "12am" (midnight) -> "00:00:00"
 
 Examples:
-- "Change the title of all my Project Reviews to Budget Reviews" -> {{"series_keyword": "Project Review", "new_title": "Budget Reviews", "new_day": null, "new_time": null}}
-- "Reschedule all my Morning Plannings to every Tuesday 3pm" -> {{"series_keyword": "Morning Planning", "new_title": null, "new_day": "tuesday", "new_time": "15:00:00"}}
-- "Move all standups to 10am" -> {{"series_keyword": "standup", "new_title": null, "new_day": null, "new_time": "10:00:00"}}
-- "Reschedule all 1:1s to Friday 6pm" -> {{"series_keyword": "1:1", "new_title": null, "new_day": "friday", "new_time": "18:00:00"}}
-- "Remove all my Team Standups" -> {{"series_keyword": "Team Standup", "new_title": null, "new_day": null, "new_time": null}}
-- "Delete all 1:1s with Manager" -> {{"series_keyword": "1:1", "new_title": null, "new_day": null, "new_time": null}}
+- "Change the title of all my Project Reviews to Budget Reviews" -> {{"series_keyword": "Project Review", "new_title": "Budget Reviews", "new_day": null, "new_time": null, "new_participants": []}}
+- "Reschedule all my Morning Plannings to every Tuesday 3pm" -> {{"series_keyword": "Morning Planning", "new_title": null, "new_day": "tuesday", "new_time": "15:00:00", "new_participants": []}}
+- "Move all standups to 10am" -> {{"series_keyword": "standup", "new_title": null, "new_day": null, "new_time": "10:00:00", "new_participants": []}}
+- "Reschedule all 1:1s to Friday 6pm" -> {{"series_keyword": "1:1", "new_title": null, "new_day": "friday", "new_time": "18:00:00", "new_participants": []}}
+- "Remove all my Team Standups" -> {{"series_keyword": "Team Standup", "new_title": null, "new_day": null, "new_time": null, "new_participants": []}}
+- "Delete all 1:1s with Manager" -> {{"series_keyword": "1:1", "new_title": null, "new_day": null, "new_time": null, "new_participants": []}}
+- "Change the participants of all my Team Standups to Bob and Charlie" -> {{"series_keyword": "Team Standup", "new_title": null, "new_day": null, "new_time": null, "new_participants": ["Bob", "Charlie"]}}
 
 Message: {user_message}
 
@@ -1072,19 +1124,28 @@ JSON:"""
         details = json.loads(response_text.strip())
         print(f"LLM extracted details: {details}")  # debug
 
+        day_of_event = details.get("new_day")
         # Handle timezone conversion for new_time if present
         new_time = details.get("new_time")
         if new_time:
             source_tz = extract_timezone_from_message(user_message)
             if source_tz:
+                days_of_week = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
                 print(f"Detected timezone: {source_tz}, converting time to SGT")
-                new_time = convert_time_to_local_tz(new_time, source_tz)
+                new_time, offset = convert_time_to_local_tz(new_time, source_tz)
+                if offset == -1 and details.get("new_day") == "monday":
+                    day_of_event = "sunday"
+                elif offset == 1 and details.get("new_day") == "sunday":
+                    day_of_event = "monday"
+                else:
+                    day_of_event = days_of_week[days_of_week.index(details.get("new_day")) + offset]
 
         return {
             "series_keyword": details.get("series_keyword"),
             "new_title": details.get("new_title"),
-            "new_day": details.get("new_day"),
-            "new_time": new_time
+            "new_day": day_of_event,
+            "new_time": new_time,
+            "new_participants": details.get("new_participants")
         }
     except Exception as e:
         print("Recurring operation extraction error:", e)
@@ -1092,7 +1153,8 @@ JSON:"""
             "series_keyword": None,
             "new_title": None,
             "new_day": None,
-            "new_time": None
+            "new_time": None,
+            "new_participants": []
         }
 
 
@@ -1119,11 +1181,13 @@ def find_recurring_series_events(username, series_keyword):
             if recurrence_group:
                 matching_groups.add(recurrence_group)
 
-    # Now get ALL events in those recurrence groups
+    # Get only current/future events in those recurrence groups
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     results = []
     for event in all_events:
         if event.get("recurrence_group") in matching_groups:
-            results.append(event)
+            if event.get("end_time", "") >= now_str:
+                results.append(event)
 
     # Sort by start_time
     results.sort(key=lambda e: e.get("start_time", ""))
@@ -1131,7 +1195,7 @@ def find_recurring_series_events(username, series_keyword):
     return results
 
 
-def update_recurring_series(username, series_keyword, new_title=None, new_day=None, new_time=None):
+def update_recurring_series(username, series_keyword, new_title=None, new_day=None, new_time=None, new_participants=[]):
     """
     Update all events in a recurring series.
 
@@ -1145,6 +1209,8 @@ def update_recurring_series(username, series_keyword, new_title=None, new_day=No
     Returns dict with count of updated events and list of updated events.
     """
     events = find_recurring_series_events(username, series_keyword)
+    print("Series keyword: ", series_keyword)
+    print(f"UPDATE_RECURRING_SERIES - Found {len(events)} events for '{series_keyword}'")  # debug
 
     if not events:
         return {"count": 0, "events": [], "error": f"No recurring series found matching '{series_keyword}'"}
@@ -1194,10 +1260,13 @@ def update_recurring_series(username, series_keyword, new_title=None, new_day=No
             except Exception as e:
                 print(f"Error updating time for event {event.get('event_id')}: {e}")
                 continue
-
+        if new_participants:
+            updates["participants"] = new_participants
+        print(f"UPDATE_RECURRING_SERIES - Event {event.get('event_id')} '{event.get('title')}': updates={updates}")  # debug
         if updates:
             event_id = event.get("event_id")
             updated_event = db.update_event(event_id, **updates)
+            print(f"UPDATE_RECURRING_SERIES - db.update_event returned: {updated_event is not None}")  # debug
             if updated_event:
                 updated_events.append(updated_event)
 
@@ -1587,8 +1656,8 @@ def get_scheduling_insight(username):
         else:
             time_str = f"{typical_hour - 12}pm"
 
-        # If it's the usual day and no meeting scheduled this week
-        if usual_day == current_day and not has_current_week_occurrence:
+        # If it's the usual day, before the usual time, and no meeting scheduled this week
+        if usual_day == current_day and not has_current_week_occurrence and current_hour < typical_hour:
             insights.append({
                 "priority": 1,
                 "text": f"You usually have {title} on {usual_day}s at {time_str}"
@@ -1639,8 +1708,8 @@ def get_scheduling_insight(username):
         # Default based on time
         if current_hour < 9:
             return "Good morning! What would you like to schedule today?"
-        elif current_day == "Friday" and current_hour >= 14:
-            return "Friday afternoon - good time for focused work"
+        elif current_day not in ("Saturday", "Sunday") and current_hour >= 14:
+            return f"{current_day} afternoon - good time for focused work"
         else:
             return "What would you like to add to your calendar?"
         

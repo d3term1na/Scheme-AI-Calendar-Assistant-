@@ -693,7 +693,9 @@ sendButton.onclick = async () => {
                 data.metadata.events_created.forEach(addEventToCalendar);
             }
             if (data.metadata.events_updated) {
+                console.log('events_updated:', JSON.stringify(data.metadata.events_updated));
                 data.metadata.events_updated.forEach(updatedEvent => {
+                    console.log('Updating event:', updatedEvent.event_id, updatedEvent.title, updatedEvent.start_time);
                     updateEventInCalendar(updatedEvent);
 
                     // Check if notes were added to a PAST meeting (already passed)

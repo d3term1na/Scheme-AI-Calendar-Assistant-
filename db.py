@@ -5,6 +5,7 @@ Handles all database operations for users, events, conversations, and embeddings
 
 import sqlite3
 import pickle
+import bcrypt
 from datetime import datetime
 from contextlib import contextmanager
 
@@ -28,9 +29,14 @@ def get_db_connection():
 
 
 def init_db():
-    """Initialize the database with the schema."""
+    """Initialize the database with the schema. Drops all tables first to reset on restart."""
     with get_db_connection() as conn:
         conn.executescript("""
+            DROP TABLE IF EXISTS conversations;
+            DROP TABLE IF EXISTS user_events;
+            DROP TABLE IF EXISTS events;
+            DROP TABLE IF EXISTS users;
+
             CREATE TABLE IF NOT EXISTS users (
                 username VARCHAR PRIMARY KEY,
                 password_hash VARCHAR NOT NULL
@@ -144,7 +150,7 @@ def create_event(username: str, title: str, start_time: str, end_time: str,
                     except sqlite3.IntegrityError:
                         # Participant might not exist as a user, skip
                         pass
-
+                    
         return {
             "event_id": event_id,
             "title": title,
@@ -251,7 +257,8 @@ def update_event(event_id: int, **updates) -> dict | None:
                     # Participant might not exist as a user, skip
                     pass
 
-        return get_event(event_id)
+    # Read after commit so the new connection sees the updated data
+    return get_event(event_id)
 
 
 def delete_event(event_id: int) -> dict | None:
@@ -278,7 +285,10 @@ def query_events(username: str, start_date: str = None, end_date: str = None,
         params = [username]
 
         if start_date:
-            query += " AND DATE(e.start_time) >= DATE(?)"
+            if " " in start_date:
+                query += " AND e.start_time >= ?"
+            else:
+                query += " AND DATE(e.start_time) >= DATE(?)"
             params.append(start_date)
 
         if end_date:
@@ -456,6 +466,14 @@ def populate_sample_data(username: str):
         print(f"[DB] User {username} already has events, skipping sample data")
         return
 
+    # Create participant users so foreign keys in user_events are satisfied
+    test_participants = ["Alice", "Bob", "Charlie", "David", "Manager"]
+    for participant in test_participants:
+        if participant != username and not get_user(participant):
+            password_hash = bcrypt.hashpw("test1234".encode(), bcrypt.gensalt()).decode()
+            create_user(participant, password_hash)
+            print(f"[DB] Created test user: {participant}")
+
     print(f"[DB] Populating sample events for {username}")
 
     # Weekly Team Standup - recurring series
@@ -518,5 +536,14 @@ def populate_sample_data(username: str):
     print(f"[DB] Sample events created for {username}")
 
 
-# Initialize database on module import
+# Initialize database on module import (resets on every restart)
 init_db()
+
+# Create test users with real passwords (password: "test1234")
+_test_users = ["Alice", "Bob", "Charlie", "David", "Manager"]
+for _user in _test_users:
+    _hash = bcrypt.hashpw("test1234".encode(), bcrypt.gensalt()).decode()
+    create_user(_user, _hash)
+
+# Populate sample events for Alice (the primary test user)
+populate_sample_data("Alice")

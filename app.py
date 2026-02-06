@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
@@ -10,7 +11,14 @@ import uuid
 # In-memory session store {session_id: username}
 sessions = {}
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(app):
+    """Embed event notes for pre-populated test users on startup."""
+    embed_existing_event_notes("Alice")
+    yield
+
+app = FastAPI(lifespan=lifespan)
 
 def get_current_user(request: Request) -> str:
     """Get the current logged-in user from session cookie. Returns None if not logged in."""
@@ -54,10 +62,6 @@ async def register(request: Request):
     if not success:
         raise HTTPException(status_code=409, detail="Username already exists")
 
-    # Populate sample data for new user
-    db.populate_sample_data(username)
-    embed_existing_event_notes(username)
-
     # Auto-login after registration
     session_id = str(uuid.uuid4())
     sessions[session_id] = username
@@ -80,7 +84,7 @@ async def login(request: Request):
     user = db.get_user(username)
     if not user:
         raise HTTPException(status_code=401, detail="Invalid username or password")
-
+    
     # Verify password
     if not bcrypt.checkpw(password.encode(), user["password_hash"].encode()):
         raise HTTPException(status_code=401, detail="Invalid username or password")
@@ -246,9 +250,9 @@ def agent_process(username, user_message, conversation_id="default"):
             duration = details.get("duration_minutes", 45)
 
             # Generate a unique recurrence_group ID for this series
-            import uuid
             recurrence_group = str(uuid.uuid4())[:8]
-
+            event_participants = details.get("participants").copy()
+            event_participants.append(username)
             for event_date in dates:
                 # Build start and end times
                 start_datetime = f"{event_date.strftime('%Y-%m-%d')} {time_str}"
@@ -269,17 +273,17 @@ def agent_process(username, user_message, conversation_id="default"):
                         "conflicts": conflicts
                     })
                     continue  # Skip this occurrence
-
+                
                 event = db.create_event(
                     username=username,
                     title=details["title"],
                     start_time=start_time_str,
                     end_time=end_time_str,
-                    participants=details.get("participants", []),
+                    participants=event_participants,
                     recurrence_group=recurrence_group
                 )
                 created_events.append(event)
-
+                print(event)
                 # Store in RAG
                 participants_info = f" with {', '.join(event['participants'])}" if event.get('participants') else ""
                 content = f"Event: {event['title']}{participants_info} scheduled for {event['start_time']}"
@@ -289,7 +293,9 @@ def agent_process(username, user_message, conversation_id="default"):
             num_events = len(created_events)
             frequency = details.get("frequency", "weekly")
             day_of_week = details.get("day_of_week", "")
-
+            participants_str = ""
+            if event.get('participants'):
+                participants_str = f" with {', '.join(details.get("participants"))}"
             # Format time nicely
             try:
                 time_parsed = dt.strptime(time_str, "%H:%M:%S")
@@ -309,9 +315,9 @@ def agent_process(username, user_message, conversation_id="default"):
                 skipped_date_strs = [s["date"].strftime("%B %d") for s in skipped_dates]
 
                 if frequency == "weekly" and day_of_week:
-                    reply = f"I've scheduled '{details['title']}' for every {day_of_week.capitalize()} at {time_formatted}, starting {first_date_str} ({num_events} events). Skipped {', '.join(skipped_date_strs)} due to conflicts."
+                    reply = f"I've scheduled '{details['title']}'{participants_str} for every {day_of_week.capitalize()} at {time_formatted}, starting {first_date_str} ({num_events} events). Skipped {', '.join(skipped_date_strs)} due to conflicts."
                 else:
-                    reply = f"Created {num_events} '{details['title']}' events starting {first_date_str}. Skipped {', '.join(skipped_date_strs)} due to conflicts."
+                    reply = f"Created {num_events} '{details['title']}' events{participants_str} starting {first_date_str}. Skipped {', '.join(skipped_date_strs)} due to conflicts."
 
                 metadata["events_created"] = created_events
                 metadata["skipped_due_to_conflict"] = skipped_dates
@@ -319,13 +325,13 @@ def agent_process(username, user_message, conversation_id="default"):
                 # No conflicts
                 first_date = dates[0]
                 first_date_str = first_date.strftime("%B %d")
-
+                
                 if frequency == "weekly" and day_of_week:
-                    reply = f"Done! I've scheduled '{details['title']}' for every {day_of_week.capitalize()} at {time_formatted}, starting {first_date_str} ({num_events} events total)."
+                    reply = f"Done! I've scheduled '{details['title']}'{participants_str} for every {day_of_week.capitalize()} at {time_formatted}, starting {first_date_str} ({num_events} events total)."
                 elif frequency == "daily":
-                    reply = f"Done! I've scheduled '{details['title']}' daily at {time_formatted}, starting {first_date_str} ({num_events} events total)."
+                    reply = f"Done! I've scheduled '{details['title']}'{participants_str} daily at {time_formatted}, starting {first_date_str} ({num_events} events total)."
                 else:
-                    reply = f"Done! I've created {num_events} recurring '{details['title']}' events starting {first_date_str} at {time_formatted}."
+                    reply = f"Done! I've created {num_events} recurring '{details['title']}' events{participants_str} starting {first_date_str} at {time_formatted}."
 
                 metadata["events_created"] = created_events
     elif intent == "DELETE":
@@ -360,12 +366,6 @@ def agent_process(username, user_message, conversation_id="default"):
                 keyword=filters["keyword"]
             )
 
-        # Fallback: get all events if still none found
-        if not events:
-            print("DELETE - Trying fallback to get all events...")  # debug
-            events = db.query_events(username=username)
-            print(f"DELETE - Total events in calendar: {len(events)}")  # debug
-
         if events:
             deleted = db.delete_event(events[0]["event_id"])
             reply = f"Deleted event: {deleted['title']} ({deleted['start_time']})"
@@ -375,9 +375,15 @@ def agent_process(username, user_message, conversation_id="default"):
     elif intent == "QUERY":
         filters = extract_query_filters(user_message)
         print(f"QUERY - Extracted filters: {filters}")  # debug
+
+        # Default to current datetime onwards when no date filters are specified
+        query_start = filters["start_date"]
+        if not query_start and not filters["end_date"]:
+            query_start = dt.now().strftime("%Y-%m-%d %H:%M:%S")
+
         events = db.query_events(
             username=username,
-            start_date=filters["start_date"],
+            start_date=query_start,
             end_date=filters["end_date"],
             participants=filters["participants"],
             keyword=filters["keyword"]
@@ -433,6 +439,7 @@ def agent_process(username, user_message, conversation_id="default"):
         # Fallback: if no events found with keyword, try without keyword
         if not events and identifier["keyword"]:
             print("UPDATE - Trying fallback without keyword filter...")  # debug
+            print(identifier["keyword"])
             events = db.query_events(
                 username=username,
                 start_date=identifier["current_date"],
@@ -440,6 +447,7 @@ def agent_process(username, user_message, conversation_id="default"):
                 participants=identifier["participants"],
                 keyword=None
             )
+            print(events)
             print(f"UPDATE - Events found without keyword: {len(events)}")  # debug
 
         # Fallback: if still no events, try without date filter
@@ -464,14 +472,14 @@ def agent_process(username, user_message, conversation_id="default"):
 
             # Build updates dict with only non-null values
             updates = {}
-            if update_details["new_title"]:
+            if update_details["new_title"] and update_details["new_title"] != event["title"]:
                 updates["title"] = update_details["new_title"]
             if update_details["new_start_time"]:
                 updates["start_time"] = update_details["new_start_time"]
             if update_details["new_end_time"]:
                 updates["end_time"] = update_details["new_end_time"]
             if update_details["new_participants"] is not None:
-                updates["participants"] = update_details["new_participants"]
+                updates["participants"] = update_details["new_participants"] + [username]
             elif update_details["add_participants"]:
                 current = event.get("participants", [])
                 updates["participants"] = current + update_details["add_participants"]
@@ -718,18 +726,79 @@ def agent_process(username, user_message, conversation_id="default"):
         if not series_keyword:
             reply = "I couldn't understand which recurring series you want to update. Please specify the meeting name."
         else:
+            update_participants = recurring_details.get("new_participants").copy()
+            update_participants.append(username)
             result = update_recurring_series(
                 username=username,
                 series_keyword=series_keyword,
                 new_title=recurring_details.get("new_title"),
                 new_day=recurring_details.get("new_day"),
-                new_time=recurring_details.get("new_time")
+                new_time=recurring_details.get("new_time"),
+                new_participants=update_participants
             )
 
             if result.get("error"):
                 reply = result["error"]
             elif result["count"] == 0:
-                reply = f"No recurring events found matching '{series_keyword}'."
+                # Not a recurring series — fall back to single-event update
+                print(f"UPDATE_RECURRING fallback - treating as single event update")  # debug
+                identifier = extract_event_identifier(user_message)
+                events = db.query_events(
+                    username=username,
+                    start_date=identifier["current_date"],
+                    end_date=identifier["current_date"],
+                    participants=identifier["participants"],
+                    keyword=identifier["keyword"]
+                )
+                if not events and identifier["keyword"]:
+                    events = db.query_events(username=username, keyword=identifier["keyword"])
+                if not events:
+                    events = db.query_events(username=username)
+
+                if events:
+                    event = events[0]
+                    update_details = extract_update_details(user_message)
+                    updates = {}
+                    if update_details["new_title"] and update_details["new_title"] != event["title"]:
+                        updates["title"] = update_details["new_title"]
+                    if update_details["new_start_time"]:
+                        updates["start_time"] = update_details["new_start_time"]
+                    if update_details["new_end_time"]:
+                        updates["end_time"] = update_details["new_end_time"]
+
+                    if "start_time" in updates or "end_time" in updates:
+                        new_start = updates.get("start_time", event["start_time"])
+                        new_end = updates.get("end_time", event["end_time"])
+                        conflicts = check_time_conflict(username, new_start, new_end, exclude_event_id=event["event_id"])
+                        if conflicts:
+                            conflict_msg = format_conflict_message(conflicts)
+                            time_str = new_start
+                            try:
+                                parsed = dt.strptime(time_str, "%Y-%m-%d %H:%M:%S")
+                                time_str = parsed.strftime("%B %d at %I:%M %p").replace(" 0", " ").lstrip("0")
+                            except:
+                                pass
+                            reply = f"I can't reschedule '{event['title']}' to {time_str}. {conflict_msg} Would you like to pick a different time?"
+                            metadata["conflict"] = True
+                            metadata["conflicting_events"] = conflicts
+                        else:
+                            updated = db.update_event(event["event_id"], **updates)
+                            time_str = updates.get('start_time', '')
+                            try:
+                                parsed = dt.strptime(time_str, "%Y-%m-%d %H:%M:%S")
+                                time_str = parsed.strftime("%B %d at %I:%M %p").replace(" 0", " ").lstrip("0")
+                            except:
+                                pass
+                            reply = f"Done! I've rescheduled '{event['title']}' to {time_str}."
+                            metadata["events_updated"] = [updated]
+                    elif updates:
+                        updated = db.update_event(event["event_id"], **updates)
+                        reply = f"Updated '{updated['title']}' successfully."
+                        metadata["events_updated"] = [updated]
+                    else:
+                        reply = "I couldn't understand what you want to change."
+                else:
+                    reply = f"No events found matching '{series_keyword}'."
             else:
                 # Build a descriptive response
                 change_parts = []
@@ -744,7 +813,8 @@ def agent_process(username, user_message, conversation_id="default"):
                         change_parts.append(f"rescheduled to {time_formatted}")
                     except:
                         change_parts.append(f"rescheduled to {recurring_details['new_time']}")
-
+                if recurring_details.get("new_participants"):
+                    change_parts.append(f"updated participants to {', '.join(recurring_details.get("new_participants"))}")
                 changes_str = " and ".join(change_parts) if change_parts else "updated"
                 reply = f"Done! I've {changes_str} all {result['count']} events in the '{series_keyword}' series."
                 metadata["events_updated"] = result["events"]
@@ -810,5 +880,6 @@ def agent_process(username, user_message, conversation_id="default"):
 
     # Save conversation to database
     db.save_conversation_message(username, conversation_id, user_message, reply)
+    print("This is the conversation id", conversation_id)
 
     return reply, metadata
