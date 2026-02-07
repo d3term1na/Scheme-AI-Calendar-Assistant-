@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 # Today's date
 today = datetime.now().strftime("%Y-%m-%d")
 now = datetime.now()
+current_weekday = now.strftime("%A")
 
 # Local timezone (Singapore)
 LOCAL_TZ = ZoneInfo("Asia/Singapore")
@@ -785,7 +786,7 @@ JSON:"""
 
 def extract_recurring_details(user_message):
     """Use LLM to extract recurring event details from natural language."""
-    extraction_prompt = f"""Extract recurring event details from this message. Today is {today} ({datetime.now().strftime("%A")}).
+    extraction_prompt = f"""Extract recurring event details from this message. Today is {today} ({current_weekday}).
 
 The user wants to create RECURRING events. Extract:
 1. Event details (title, time, participants)
@@ -980,7 +981,7 @@ def calculate_recurring_dates(details):
 
 def extract_bulk_operation_details(user_message):
     """Extract source date and destination date for bulk reschedule/cancel operations."""
-    extraction_prompt = f"""Extract the dates from this bulk calendar operation. Today is {today} ({datetime.now().strftime("%A")}).
+    extraction_prompt = f"""Extract the dates from this bulk calendar operation. Today is {today} ({current_weekday}).
 
 The user wants to move/reschedule/cancel ALL events from one date. Extract:
 - source_date: The date to move events FROM (or cancel events on)
@@ -1061,7 +1062,7 @@ def extract_recurring_operation_details(user_message):
     - "Reschedule all my Morning Plannings to every Tuesday 3pm"
     - "Remove all my Team Standups"
     """
-    extraction_prompt = f"""Extract details for an operation on a RECURRING event series. Today is {today} ({datetime.now().strftime("%A")}).
+    extraction_prompt = f"""Extract details for an operation on a RECURRING event series. Today is {today} ({current_weekday}).
 
 The user wants to modify or delete ALL occurrences in a recurring series. Extract:
 
@@ -1171,7 +1172,7 @@ def find_recurring_series_events(username, series_keyword):
     all_events = db.get_user_events(username)
 
     # First, find events that match the keyword
-    matching_groups = set()
+    matching_group = ""
 
     for event in all_events:
         title_lower = event.get("title", "").lower().strip()
@@ -1180,13 +1181,14 @@ def find_recurring_series_events(username, series_keyword):
         # Check if title matches the keyword
         if keyword_lower in title_lower or title_lower in keyword_lower:
             if recurrence_group:
-                matching_groups.add(recurrence_group)
+                matching_group = recurrence_group
+                break
 
     # Get only current/future events in those recurrence groups
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     results = []
     for event in all_events:
-        if event.get("recurrence_group") in matching_groups:
+        if event.get("recurrence_group") == matching_group:
             if event.get("end_time", "") >= now_str:
                 results.append(event)
 
@@ -1338,7 +1340,7 @@ def embed_existing_event_notes(username):
             except:
                 date_str = event['start_time'].split(' ')[0]
             # Embed the event notes with context
-            content = f"Meeting '{event['title']}' on {date_str}: {notes}"
+            content = f"Event '{event['title']}' on {date_str}: {notes}"
             store_event_embedding(event["event_id"], content)
             embedded_count += 1
             print(f"[RAG] Embedded notes for: {event['title']} on {date_str}")
@@ -1371,7 +1373,7 @@ def retrieve_top_k(username, query_vector, k=3):
     return [content for content, _ in results[:k]]
 
 # -----------------------------
-# Calendar event CRUD functions
+# Conflict detection
 # -----------------------------
 def check_time_conflict(username, start_time, end_time, exclude_event_id=None):
     """
@@ -1423,9 +1425,9 @@ def format_conflict_message(conflicts):
             pass
         return f"This conflicts with '{event['title']}' scheduled for {time_str}."
     else:
-        event_names = [f"'{e['title']}'" for e in conflicts[:3]]
-        if len(conflicts) > 3:
-            return f"This conflicts with {', '.join(event_names)} and {len(conflicts) - 3} other event(s)."
+        event_names = [f"'{e['title']}'" for e in conflicts[:2]]
+        if len(conflicts) > 2:
+            return f"This conflicts with {', '.join(event_names)} and {len(conflicts) - 2} other event(s)."
         return f"This conflicts with {' and '.join(event_names)}."
 
 # -----------------------------
@@ -1497,7 +1499,7 @@ def get_upcoming_recurring_meetings(username):
                 last_with_notes["title"],
                 notes
             )
-            
+
             suggestions.append({
                 "upcoming_event": upcoming_event,
                 "last_occurrence": last_with_notes,
@@ -1629,8 +1631,6 @@ def get_scheduling_insight(username):
     Detects missing recurring meetings and suggests based on history.
     """
     patterns = analyze_scheduling_patterns(username)
-    now = datetime.now()
-    current_day = now.strftime("%A")
     current_hour = now.hour
     start_of_week, end_of_week = get_current_week_range()
 
@@ -1659,7 +1659,7 @@ def get_scheduling_insight(username):
             time_str = f"{typical_hour - 12}pm"
 
         # If it's the usual day, before the usual time, and no meeting scheduled this week
-        if usual_day == current_day and not has_current_week_occurrence and current_hour < typical_hour:
+        if usual_day == current_weekday and not has_current_week_occurrence and current_hour < typical_hour:
             insights.append({
                 "priority": 1,
                 "text": f"You usually have {title} on {usual_day}s at {time_str}"
@@ -1668,7 +1668,7 @@ def get_scheduling_insight(username):
         elif not has_current_week_occurrence:
             day_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
             usual_day_idx = day_order.index(usual_day)
-            current_day_idx = day_order.index(current_day)
+            current_day_idx = day_order.index(current_weekday)
 
             if usual_day_idx > current_day_idx:
                 # Upcoming day this week, meeting not scheduled
@@ -1710,8 +1710,8 @@ def get_scheduling_insight(username):
         # Default based on time
         if current_hour < 9:
             return "Good morning! What would you like to schedule today?"
-        elif current_day not in ("Saturday", "Sunday") and current_hour >= 14:
-            return f"{current_day} afternoon - good time for focused work"
+        elif current_weekday not in ("Saturday", "Sunday") and current_hour >= 14:
+            return f"{current_weekday} afternoon - good time for focused work"
         else:
             return "What would you like to add to your calendar?"
         
