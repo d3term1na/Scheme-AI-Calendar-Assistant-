@@ -164,10 +164,9 @@ async def get_insight(request: Request):
 async def chat_endpoint(request: Request):
     username = require_auth(request)
     body = await request.json()
-    conversation_id = body.get("conversation_id", "default")
     user_message = body.get("message", "")
 
-    reply, metadata = agent_process(username, user_message, conversation_id)
+    reply, metadata = agent_process(username, user_message)
     print("Sending reply:", reply)  # debug
     return {
         "reply": reply,
@@ -180,9 +179,9 @@ app.mount("/", StaticFiles(directory="frontend", html=True), name="frontend")
 # -----------------------------
 # Agent logic
 # -----------------------------
-def agent_process(username, user_message, conversation_id="default"):
+def agent_process(username, user_message):
     # Get conversation history from database
-    history = db.get_conversation_history(username, conversation_id)
+    history = db.get_conversation_history(username)
     history.append({"user": user_message})
 
     reply = ""
@@ -879,7 +878,6 @@ def agent_process(username, user_message, conversation_id="default"):
         metadata["relevant_events"] = relevant_events
 
     # Save conversation to database
-    db.save_conversation_message(username, conversation_id, user_message, reply)
-    print("This is the conversation id", conversation_id)
+    db.save_conversation_message(username, user_message, reply)
 
     return reply, metadata

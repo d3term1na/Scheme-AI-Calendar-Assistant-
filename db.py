@@ -62,7 +62,6 @@ def init_db():
 
             CREATE TABLE IF NOT EXISTS conversations (
                 message_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                conversation_id VARCHAR,
                 username VARCHAR,
                 user_message TEXT,
                 agent_message TEXT,
@@ -73,7 +72,6 @@ def init_db():
 
             CREATE INDEX IF NOT EXISTS idx_events_start_time ON events(start_time);
             CREATE INDEX IF NOT EXISTS idx_events_recurrence_group ON events(recurrence_group);
-            CREATE INDEX IF NOT EXISTS idx_conversations_conversation_id ON conversations(conversation_id);
             CREATE INDEX IF NOT EXISTS idx_conversations_username ON conversations(username);
         """)
     print("[DB] Database initialized successfully")
@@ -402,28 +400,28 @@ def get_events_with_embeddings(username: str) -> list:
 # Conversation operations
 # =============================================================================
 
-def save_conversation_message(username: str, conversation_id: str,
+def save_conversation_message(username: str,
                               user_message: str, agent_message: str,
                               embedding_vector = None) -> int:
     """Save a conversation exchange."""
     embedding_blob = pickle.dumps(embedding_vector) if embedding_vector is not None else None
     with get_db_connection() as conn:
         cursor = conn.execute(
-            """INSERT INTO conversations (conversation_id, username, user_message, agent_message, embedding)
-               VALUES (?, ?, ?, ?, ?)""",
-            (conversation_id, username, user_message, agent_message, embedding_blob)
+            """INSERT INTO conversations (username, user_message, agent_message, embedding)
+               VALUES (?, ?, ?, ?)""",
+            (username, user_message, agent_message, embedding_blob)
         )
         return cursor.lastrowid
 
 
-def get_conversation_history(username: str, conversation_id: str) -> list:
+def get_conversation_history(username: str) -> list:
     """Get conversation history for a user's conversation."""
     with get_db_connection() as conn:
         rows = conn.execute(
             """SELECT user_message, agent_message, created_at FROM conversations
-               WHERE username = ? AND conversation_id = ?
+               WHERE username = ?
                ORDER BY created_at""",
-            (username, conversation_id)
+            (username,)
         ).fetchall()
 
         history = []
