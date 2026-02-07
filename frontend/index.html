@@ -1,109 +1,995 @@
-<!-- <div id="chat"></div>
-<input id="message" />
-<button id="send">Send</button>
-
-<script>
-const chat = document.getElementById('chat')
-document.getElementById('send').onclick = async () => {
-  const msg = document.getElementById('message').value
-  chat.innerHTML += `<div class="user">${msg}</div>`
-  
-  // show loading
-  const loadingBubble = document.createElement('div')
-  loadingBubble.className = 'agent'
-  loadingBubble.textContent = 'Thinking...'
-  chat.appendChild(loadingBubble)
-  
-  // send to backend
-  const res = await fetch('/chat', { method:'POST', body: JSON.stringify({message: msg}) })
-  const data = await res.json()
-  
-  // replace loading with actual response
-  loadingBubble.textContent = data.reply
-}
-</script> -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <title>AI Calendar Assistant</title>
 <style>
-body { font-family: Arial; margin: 20px; }
-#chat { border: 1px solid #ccc; padding: 10px; height: 400px; overflow-y: auto; display: flex; flex-direction: column; }
-.message { margin: 5px 0; padding: 5px 10px; border-radius: 5px; max-width: 70%; animation: fadeIn 0.2s ease-out; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+    font-family: 'Segoe UI', Arial, sans-serif;
+    height: 100vh;
+    background: #f5f5f5;
+}
+body.logged-in {
+    display: grid;
+    grid-template-columns: 450px 1fr;
+    grid-template-rows: auto 1fr;
+}
+body:not(.logged-in) {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+/* Login/Register Form */
+.auth-container {
+    background: white;
+    padding: 40px;
+    border-radius: 12px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+    width: 100%;
+    max-width: 400px;
+}
+.auth-container h1 {
+    color: #4a90d9;
+    margin-bottom: 8px;
+    font-size: 1.8em;
+}
+.auth-container .subtitle {
+    color: #666;
+    margin-bottom: 25px;
+    font-size: 0.95em;
+}
+.auth-tabs {
+    display: flex;
+    margin-bottom: 25px;
+    border-bottom: 2px solid #eee;
+}
+.auth-tab {
+    flex: 1;
+    padding: 12px;
+    border: none;
+    background: none;
+    cursor: pointer;
+    font-size: 1em;
+    color: #666;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -2px;
+}
+.auth-tab.active {
+    color: #4a90d9;
+    border-bottom-color: #4a90d9;
+}
+.auth-form {
+    display: none;
+}
+.auth-form.active {
+    display: block;
+}
+.auth-form input {
+    width: 100%;
+    padding: 12px;
+    margin-bottom: 15px;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    font-size: 1em;
+}
+.auth-form input:focus {
+    outline: none;
+    border-color: #4a90d9;
+}
+.auth-form button {
+    width: 100%;
+    padding: 14px;
+    background: #4a90d9;
+    color: white;
+    border: none;
+    border-radius: 8px;
+    font-size: 1em;
+    cursor: pointer;
+    font-weight: 500;
+}
+.auth-form button:hover {
+    background: #3a7bc8;
+}
+.auth-form button:disabled {
+    background: #a0c4e8;
+    cursor: not-allowed;
+}
+.auth-error {
+    color: #dc3545;
+    background: #f8d7da;
+    padding: 10px;
+    border-radius: 6px;
+    margin-bottom: 15px;
+    font-size: 0.9em;
+    display: none;
+}
+.auth-error.visible {
+    display: block;
+}
+
+/* Main App (hidden when not logged in) */
+.main-app {
+    display: none;
+}
+body.logged-in .main-app {
+    display: contents;
+}
+body.logged-in .auth-container {
+    display: none;
+}
+
+/* Top title bar spanning full width */
+.app-title {
+    grid-column: 1 / 3;
+    grid-row: 1;
+    padding: 20px 25px;
+    background: #4a90d9;
+    color: white;
+    font-size: 1.4em;
+    font-weight: 600;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+.user-info {
+    display: flex;
+    align-items: center;
+    gap: 15px;
+    font-size: 0.75em;
+    font-weight: normal;
+}
+.user-info span {
+    opacity: 0.9;
+}
+#logoutBtn {
+    padding: 6px 14px;
+    background: rgba(255,255,255,0.2);
+    border: 1px solid rgba(255,255,255,0.3);
+    color: white;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.9em;
+}
+#logoutBtn:hover {
+    background: rgba(255,255,255,0.3);
+}
+
+/* Left column - Chat */
+.left-panel {
+    grid-column: 1;
+    grid-row: 2;
+    display: flex;
+    flex-direction: column;
+    background: #fff;
+    border-right: 1px solid #ddd;
+}
+
+.chat-container {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+
+#chat {
+    flex: 1;
+    padding: 15px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    background: #fafafa;
+}
+
+.message {
+    padding: 10px 14px;
+    border-radius: 12px;
+    max-width: 85%;
+    animation: fadeIn 0.2s ease-out;
+    line-height: 1.4;
+    font-size: 0.95em;
+}
+
 @keyframes fadeIn {
     from { opacity: 0; transform: translateY(5px); }
     to { opacity: 1; transform: translateY(0); }
 }
-.user { background-color: #d1e7dd; align-self: flex-end; margin-left: auto; }
-.agent { background-color: #f8d7da; align-self: flex-start; margin-right: auto; font-style: italic; }
-#inputArea { margin-top: 10px; display: flex; }
-#message { flex: 1; padding: 5px; }
-#send { padding: 5px 10px; margin-left: 5px; }
+
+.user {
+    background: #4a90d9;
+    color: white;
+    align-self: flex-end;
+    border-bottom-right-radius: 4px;
+}
+
+.agent {
+    background: #e9ecef;
+    color: #333;
+    align-self: flex-start;
+    border-bottom-left-radius: 4px;
+    white-space: pre-wrap;
+}
+
+#inputArea {
+    padding: 15px;
+    display: flex;
+    gap: 10px;
+    background: #fff;
+    border-top: 1px solid #eee;
+    align-items: flex-end;
+}
+
+.input-wrapper {
+    flex: 1;
+    position: relative;
+}
+
+#message {
+    width: 100%;
+    padding: 12px;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    font-size: 0.95em;
+    outline: none;
+    font-family: inherit;
+    resize: none;
+    min-height: 44px;
+    max-height: 150px;
+    overflow-y: auto;
+    line-height: 1.4;
+}
+
+#message:focus { border-color: #4a90d9; }
+
+#message::placeholder {
+    color: #999;
+    font-style: italic;
+}
+
+#send {
+    padding: 12px 20px;
+    background: #4a90d9;
+    color: white;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    font-weight: 500;
+}
+
+#send:hover { background: #3a7bc8; }
+#send:disabled { background: #a0c4e8; cursor: not-allowed; }
+
+/* Agenda Suggestion Box */
+.suggestion-box {
+    position: relative;
+    background: #d4edda;
+    border: 1px solid #28a745;
+    border-radius: 8px;
+    padding: 12px 15px;
+    margin: 0 15px 10px 15px;
+    color: #155724;
+    font-size: 0.9em;
+    animation: slideDown 0.3s ease-out;
+    box-shadow: 0 2px 8px rgba(40, 167, 69, 0.2);
+}
+
+@keyframes slideDown {
+    from { opacity: 0; transform: translateY(-10px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.suggestion-box::after {
+    content: '';
+    position: absolute;
+    bottom: -10px;
+    left: 50%;
+    transform: translateX(-50%);
+    border-width: 10px 10px 0 10px;
+    border-style: solid;
+    border-color: #28a745 transparent transparent transparent;
+}
+
+.suggestion-box-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 8px;
+}
+
+.suggestion-box-title {
+    font-weight: 600;
+    font-size: 0.95em;
+    color: #155724;
+}
+
+.suggestion-box-close {
+    background: none;
+    border: none;
+    color: #155724;
+    font-size: 1.2em;
+    cursor: pointer;
+    padding: 0 4px;
+    line-height: 1;
+    opacity: 0.7;
+}
+
+.suggestion-box-close:hover {
+    opacity: 1;
+}
+
+.suggestion-box-meeting {
+    font-size: 0.85em;
+    color: #1e7e34;
+    margin-bottom: 6px;
+}
+
+.suggestion-box-content {
+    white-space: pre-wrap;
+    line-height: 1.5;
+}
+
+.suggestion-box-use {
+    margin-top: 10px;
+    padding: 6px 12px;
+    background: #28a745;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.85em;
+}
+
+.suggestion-box-use:hover {
+    background: #218838;
+}
+
+/* Right column - Calendar */
+.calendar-panel {
+    grid-column: 2;
+    grid-row: 2;
+    padding: 25px;
+    overflow-y: auto;
+}
+
+.calendar-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+}
+
+.calendar-header h2 {
+    font-size: 1.5em;
+    color: #333;
+}
+
+.calendar-nav {
+    display: flex;
+    gap: 10px;
+}
+
+.calendar-nav button {
+    padding: 8px 16px;
+    border: 1px solid #ddd;
+    background: white;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.9em;
+}
+
+.calendar-nav button:hover { background: #f0f0f0; }
+
+.calendar {
+    background: white;
+    border-radius: 12px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    overflow: hidden;
+}
+
+.calendar-weekdays {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    background: #4a90d9;
+    color: white;
+}
+
+.calendar-weekdays div {
+    padding: 12px;
+    text-align: center;
+    font-weight: 600;
+    font-size: 0.85em;
+}
+
+.calendar-days {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+}
+
+.calendar-day {
+    min-height: 140px;
+    padding: 8px;
+    border: 1px solid #eee;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.calendar-day:hover { background: #f8f9fa; }
+
+.calendar-day.other-month {
+    background: #fafafa;
+    color: #aaa;
+}
+
+.calendar-day.today {
+    background: #e3f2fd;
+}
+
+.day-number {
+    font-weight: 600;
+    font-size: 0.9em;
+    margin-bottom: 5px;
+}
+
+.day-events {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.event-item {
+    background: #4a90d9;
+    color: white;
+    padding: 3px 6px;
+    border-radius: 4px;
+    font-size: 0.75em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
 </style>
 </head>
 <body>
-<h2>AI Calendar Assistant</h2>
-<div id="chat"></div>
-<div id="inputArea">
-<input type="text" id="message" placeholder="Type your message..." />
-<button id="send">Send</button>
+
+<!-- Auth Container (Login/Register) -->
+<div class="auth-container">
+    <h1>📅 AI Calendar</h1>
+    <p class="subtitle">Your intelligent scheduling assistant</p>
+
+    <div class="auth-tabs">
+        <button class="auth-tab active" data-tab="login">Login</button>
+        <button class="auth-tab" data-tab="register">Register</button>
+    </div>
+
+    <div class="auth-error" id="authError"></div>
+
+    <form class="auth-form active" id="loginForm">
+        <input type="text" id="loginUsername" placeholder="Username" required>
+        <input type="password" id="loginPassword" placeholder="Password" required>
+        <button type="submit">Login</button>
+    </form>
+
+    <form class="auth-form" id="registerForm">
+        <input type="text" id="registerUsername" placeholder="Username (min 3 chars)" required>
+        <input type="password" id="registerPassword" placeholder="Password (min 4 chars)" required>
+        <button type="submit">Create Account</button>
+    </form>
 </div>
 
+<!-- Main App (shown when logged in) -->
+<div class="main-app">
+    <!-- Top Title Bar -->
+    <div class="app-title">
+        <span>📅 AI Calendar Assistant</span>
+        <div class="user-info">
+            <span>Welcome, <strong id="currentUser"></strong></span>
+            <button id="logoutBtn">Logout</button>
+        </div>
+    </div>
+
+    <!-- Left Panel: Chat -->
+    <div class="left-panel">
+    <div class="chat-container">
+        <div id="chat"></div>
+        <div id="suggestionContainer"></div>
+        <div id="inputArea">
+            <div class="input-wrapper">
+                <textarea id="message" rows="1" placeholder="Type a message..."></textarea>
+            </div>
+            <button id="send">Send</button>
+        </div>
+    </div>
+</div>
+
+<!-- Right Panel: Calendar -->
+<div class="calendar-panel">
+    <div class="calendar-header">
+        <h2 id="calendarTitle">February 2026</h2>
+        <div class="calendar-nav">
+            <button id="prevMonth">← Prev</button>
+            <button id="todayBtn">Today</button>
+            <button id="nextMonth">Next →</button>
+        </div>
+    </div>
+    <div class="calendar">
+        <div class="calendar-weekdays">
+            <div>Sun</div>
+            <div>Mon</div>
+            <div>Tue</div>
+            <div>Wed</div>
+            <div>Thu</div>
+            <div>Fri</div>
+            <div>Sat</div>
+        </div>
+        <div class="calendar-days" id="calendarDays"></div>
+    </div>
+</div>
+</div> <!-- End main-app -->
+
 <script>
+// ===================
+// Authentication
+// ===================
+let currentUsername = null;
+
+// Auth tab switching
+document.querySelectorAll('.auth-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+        document.querySelectorAll('.auth-tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.auth-form').forEach(f => f.classList.remove('active'));
+        tab.classList.add('active');
+        document.getElementById(tab.dataset.tab + 'Form').classList.add('active');
+        document.getElementById('authError').classList.remove('visible');
+    });
+});
+
+function showAuthError(message) {
+    const errorEl = document.getElementById('authError');
+    errorEl.textContent = message;
+    errorEl.classList.add('visible');
+}
+
+// Login form
+document.getElementById('loginForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const username = document.getElementById('loginUsername').value.trim();
+    const password = document.getElementById('loginPassword').value;
+
+    try {
+        const res = await fetch('/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, password })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+            showAuthError(data.detail || 'Login failed');
+            return;
+        }
+        setLoggedIn(data.username);
+    } catch (err) {
+        showAuthError('Could not connect to server');
+    }
+});
+
+// Register form
+document.getElementById('registerForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const username = document.getElementById('registerUsername').value.trim();
+    const password = document.getElementById('registerPassword').value;
+
+    try {
+        const res = await fetch('/register', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, password })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+            showAuthError(data.detail || 'Registration failed');
+            return;
+        }
+        setLoggedIn(data.username);
+    } catch (err) {
+        showAuthError('Could not connect to server');
+    }
+});
+
+// Logout
+document.getElementById('logoutBtn').addEventListener('click', async () => {
+    try {
+        await fetch('/logout', { method: 'POST' });
+    } catch (err) {}
+    setLoggedOut();
+});
+
+function setLoggedIn(username) {
+    currentUsername = username;
+    document.body.classList.add('logged-in');
+    document.getElementById('currentUser').textContent = username;
+    // Clear form inputs
+    document.getElementById('loginUsername').value = '';
+    document.getElementById('loginPassword').value = '';
+    document.getElementById('registerUsername').value = '';
+    document.getElementById('registerPassword').value = '';
+    document.getElementById('authError').classList.remove('visible');
+    // Initialize the app
+    initializeApp();
+}
+
+function setLoggedOut() {
+    currentUsername = null;
+    document.body.classList.remove('logged-in');
+    // Clear app state
+    events = {};
+    currentSuggestions = [];
+    dismissedSuggestions.clear();
+    chat.innerHTML = '';
+    renderCalendar();
+}
+
+// Check auth status on page load
+async function checkAuthStatus() {
+    try {
+        const res = await fetch('/me');
+        if (res.ok) {
+            const data = await res.json();
+            setLoggedIn(data.username);
+        }
+    } catch (err) {}
+}
+
+// ===================
+// Main App
+// ===================
 const chat = document.getElementById('chat');
 const messageInput = document.getElementById('message');
 const sendButton = document.getElementById('send');
 const conversationId = "default";
 
+// Calendar state
+let currentDate = new Date();
+let currentMonth = currentDate.getMonth();
+let currentYear = currentDate.getFullYear();
+let events = {}; // Store events by date key "YYYY-MM-DD"
+
+// Chat functionality
 sendButton.onclick = async () => {
-  const msg = messageInput.value.trim();
-  if (!msg) return;
+    const msg = messageInput.value.trim();
+    if (!msg) return;
 
-  // Disable button until reply comes
-  sendButton.disabled = true;
+    sendButton.disabled = true;
 
-  // Show user message
-  const userBubble = document.createElement('div');
-  userBubble.className = 'message user';
-  userBubble.textContent = msg;
-  chat.appendChild(userBubble);
-  messageInput.value = '';
+    const userBubble = document.createElement('div');
+    userBubble.className = 'message user';
+    userBubble.textContent = msg;
+    chat.appendChild(userBubble);
+    messageInput.value = '';
 
-  // Show loading
-  const loadingBubble = document.createElement('div');
-  loadingBubble.className = 'message agent';
-  loadingBubble.textContent = 'Thinking...';
-  chat.appendChild(loadingBubble);
-  chat.scrollTop = chat.scrollHeight;
-
-  try {
-    // FIX: Ensure fetch matches FastAPI endpoint exactly and includes Content-Type
-    const res = await fetch('/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ conversation_id: conversationId, message: msg })
-    });
-
-    if (!res.ok) {
-      // handle 405 or other HTTP errors
-      loadingBubble.textContent = `Error: ${res.status} ${res.statusText}`;
-      return;
-    }
-    const data = await res.json();
-    loadingBubble.textContent = data.reply || "No reply from server";
-  } catch (err) {
-    loadingBubble.textContent = "Error: could not reach backend";
-    console.error(err);
-  } finally {
-    sendButton.disabled = false;  // re-enable
+    const loadingBubble = document.createElement('div');
+    loadingBubble.className = 'message agent';
+    loadingBubble.textContent = 'Thinking...';
+    chat.appendChild(loadingBubble);
     chat.scrollTop = chat.scrollHeight;
-  }
+
+    try {
+        const res = await fetch('/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ conversation_id: conversationId, message: msg })
+        });
+
+        if (!res.ok) {
+            loadingBubble.textContent = `Error: ${res.status} ${res.statusText}`;
+            return;
+        }
+        const data = await res.json();
+        loadingBubble.textContent = data.reply || "No reply from server";
+
+        // Update calendar if events were created/updated/deleted
+        if (data.metadata) {
+            if (data.metadata.events_created) {
+                data.metadata.events_created.forEach(addEventToCalendar);
+            }
+            if (data.metadata.events_updated) {
+                console.log('events_updated:', JSON.stringify(data.metadata.events_updated));
+                data.metadata.events_updated.forEach(updatedEvent => {
+                    console.log('Updating event:', updatedEvent.event_id, updatedEvent.title, updatedEvent.start_time);
+                    updateEventInCalendar(updatedEvent);
+
+                    // Check if notes were added to a PAST meeting (already passed)
+                    const eventTime = new Date(updatedEvent.start_time.replace(' ', 'T'));
+                    const now = new Date();
+                    const isPastEvent = eventTime < now;
+
+                    // If notes added to a past recurring meeting, show suggestions for upcoming ones
+                    if (isPastEvent && updatedEvent.recurrence_group && updatedEvent.notes) {
+                        // Clear dismissed suggestions for this recurring series
+                        // so the new suggestion based on these notes can appear
+                        clearDismissedForRecurrenceGroup(updatedEvent.recurrence_group);
+                        fetchAgendaSuggestions();
+                    }
+                });
+            }
+            if (data.metadata.events_deleted) {
+                data.metadata.events_deleted.forEach(e => {
+                    const dateKey = e.start_time.split(' ')[0];
+                    if (events[dateKey]) {
+                        events[dateKey] = events[dateKey].filter(ev => ev.event_id !== e.event_id);
+                    }
+                });
+                renderCalendar();
+            }
+
+            // Refresh scheduling insight after any calendar changes
+            if (data.metadata.events_created || data.metadata.events_updated || data.metadata.events_deleted) {
+                fetchSchedulingInsight();
+            }
+        }
+    } catch (err) {
+        loadingBubble.textContent = "Error: could not reach backend";
+        console.error(err);
+    } finally {
+        sendButton.disabled = false;
+        chat.scrollTop = chat.scrollHeight;
+        // Reset textarea height after sending
+        messageInput.style.height = 'auto';
+    }
 };
 
+// Auto-expand textarea as user types
+function autoExpandTextarea() {
+    messageInput.style.height = 'auto';
+    messageInput.style.height = Math.min(messageInput.scrollHeight, 150) + 'px';
+}
+
+messageInput.addEventListener('input', autoExpandTextarea);
+
+// Handle Enter key (Enter to send, Shift+Enter for new line)
 messageInput.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && !sendButton.disabled) sendButton.click();
+    if (e.key === 'Enter' && !e.shiftKey && !sendButton.disabled) {
+        e.preventDefault();
+        sendButton.click();
+    }
 });
+
+
+// Calendar functionality
+function addEventToCalendar(event) {
+    const dateKey = event.start_time.split(' ')[0];
+    if (!events[dateKey]) events[dateKey] = [];
+    events[dateKey].push(event);
+    renderCalendar();
+}
+
+function updateEventInCalendar(updatedEvent) {
+    // First, remove the old event from all date keys (in case date changed)
+    for (const dateKey in events) {
+        events[dateKey] = events[dateKey].filter(e => e.event_id !== updatedEvent.event_id);
+        // Clean up empty date keys
+        if (events[dateKey].length === 0) {
+            delete events[dateKey];
+        }
+    }
+    // Then add the updated event to its new date
+    const newDateKey = updatedEvent.start_time.split(' ')[0];
+    if (!events[newDateKey]) events[newDateKey] = [];
+    events[newDateKey].push(updatedEvent);
+    renderCalendar();
+}
+
+function renderCalendar() {
+    const calendarDays = document.getElementById('calendarDays');
+    const calendarTitle = document.getElementById('calendarTitle');
+
+    const monthNames = ['January', 'February', 'March', 'April', 'May', 'June',
+                        'July', 'August', 'September', 'October', 'November', 'December'];
+
+    calendarTitle.textContent = `${monthNames[currentMonth]} ${currentYear}`;
+
+    const firstDay = new Date(currentYear, currentMonth, 1);
+    const lastDay = new Date(currentYear, currentMonth + 1, 0);
+    const startingDay = firstDay.getDay();
+    const totalDays = lastDay.getDate();
+
+    const today = new Date();
+    const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+
+    let html = '';
+
+    // Previous month days
+    const prevMonthLastDay = new Date(currentYear, currentMonth, 0).getDate();
+    for (let i = startingDay - 1; i >= 0; i--) {
+        const day = prevMonthLastDay - i;
+        html += `<div class="calendar-day other-month"><div class="day-number">${day}</div></div>`;
+    }
+
+    // Current month days
+    for (let day = 1; day <= totalDays; day++) {
+        const dateKey = `${currentYear}-${String(currentMonth + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+        const isToday = dateKey === todayKey;
+        const dayEvents = events[dateKey] || [];
+
+        let eventsHtml = '';
+        // Sort events by start time
+        const sortedEvents = [...dayEvents].sort((a, b) => {
+            const timeA = a.start_time.split(' ')[1] || '00:00:00';
+            const timeB = b.start_time.split(' ')[1] || '00:00:00';
+            return timeA.localeCompare(timeB);
+        });
+        sortedEvents.forEach(e => {
+            const time = e.start_time.split(' ')[1]?.substring(0, 5) || '';
+            eventsHtml += `<div class="event-item" title="${e.title}">${time} ${e.title}</div>`;
+        });
+
+        html += `
+            <div class="calendar-day${isToday ? ' today' : ''}" data-date="${dateKey}">
+                <div class="day-number">${day}</div>
+                <div class="day-events">${eventsHtml}</div>
+            </div>
+        `;
+    }
+
+    // Next month days - only fill to complete the last row (don't add full greyed-out rows)
+    const totalCellsUsed = startingDay + totalDays;
+    const remainingInRow = (7 - (totalCellsUsed % 7)) % 7;
+    for (let day = 1; day <= remainingInRow; day++) {
+        html += `<div class="calendar-day other-month"><div class="day-number">${day}</div></div>`;
+    }
+
+    calendarDays.innerHTML = html;
+}
+
+// Calendar navigation
+document.getElementById('prevMonth').onclick = () => {
+    currentMonth--;
+    if (currentMonth < 0) { currentMonth = 11; currentYear--; }
+    renderCalendar();
+};
+
+document.getElementById('nextMonth').onclick = () => {
+    currentMonth++;
+    if (currentMonth > 11) { currentMonth = 0; currentYear++; }
+    renderCalendar();
+};
+
+document.getElementById('todayBtn').onclick = () => {
+    const today = new Date();
+    currentMonth = today.getMonth();
+    currentYear = today.getFullYear();
+    renderCalendar();
+};
+
+// Agenda Suggestions functionality
+let currentSuggestions = [];
+let dismissedSuggestions = new Set();
+
+// Clear dismissed suggestions for a specific recurrence group
+function clearDismissedForRecurrenceGroup(recurrenceGroup) {
+    // Find all events in this recurrence group and remove them from dismissed
+    for (const dateKey in events) {
+        events[dateKey].forEach(event => {
+            if (event.recurrence_group === recurrenceGroup) {
+                dismissedSuggestions.delete(event.event_id);
+            }
+        });
+    }
+}
+
+async function fetchAgendaSuggestions() {
+    try {
+        const res = await fetch('/agenda-suggestions');
+        if (!res.ok) return;
+        const data = await res.json();
+        currentSuggestions = data.suggestions || [];
+        showNextSuggestion();
+    } catch (err) {
+        console.error('Error fetching agenda suggestions:', err);
+    }
+}
+
+function showNextSuggestion() {
+    const container = document.getElementById('suggestionContainer');
+    container.innerHTML = '';
+
+    // Find first non-dismissed suggestion
+    const suggestion = currentSuggestions.find(s => !dismissedSuggestions.has(s.event_id));
+    if (!suggestion) return;
+
+    // Format the meeting time
+    let meetingTime = suggestion.event_time;
+    try {
+        const date = new Date(suggestion.event_time.replace(' ', 'T'));
+        meetingTime = date.toLocaleDateString('en-US', {
+            weekday: 'short',
+            month: 'short',
+            day: 'numeric',
+            hour: 'numeric',
+            minute: '2-digit'
+        });
+    } catch (e) {}
+
+    const box = document.createElement('div');
+    box.className = 'suggestion-box';
+    box.innerHTML = `
+        <div class="suggestion-box-header">
+            <span class="suggestion-box-title">Suggested Agenda Items</span>
+            <button class="suggestion-box-close" onclick="dismissSuggestion(${suggestion.event_id})">&times;</button>
+        </div>
+        <div class="suggestion-box-meeting">For: ${suggestion.event_title} (${meetingTime})</div>
+        <div class="suggestion-box-content">${escapeHtml(suggestion.suggested_agenda)}</div>
+        <button class="suggestion-box-use" onclick="useSuggestion(${suggestion.event_id})">Use as message</button>
+    `;
+    container.appendChild(box);
+}
+
+function dismissSuggestion(eventId) {
+    dismissedSuggestions.add(eventId);
+    showNextSuggestion();
+}
+
+function useSuggestion(eventId) {
+    const suggestion = currentSuggestions.find(s => s.event_id === eventId);
+    if (suggestion) {
+        const agendaText = `Add notes to ${suggestion.event_title} on ${suggestion.event_time}: ${suggestion.suggested_agenda.replace(/\n/g, ' ')}`;
+        messageInput.value = agendaText;
+        messageInput.focus();
+        dismissSuggestion(eventId);
+    }
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+// Fetch scheduling insight for placeholder
+async function fetchSchedulingInsight() {
+    try {
+        const res = await fetch('/scheduling-insight');
+        if (res.ok) {
+            const data = await res.json();
+            if (data.insight) {
+                messageInput.placeholder = data.insight;
+            }
+        }
+    } catch (err) {
+        console.error('Error fetching scheduling insight:', err);
+    }
+}
+
+// Fetch events and suggestions on page load
+async function initializeApp() {
+    try {
+        // Fetch existing events
+        const eventsRes = await fetch('/events');
+        if (eventsRes.ok) {
+            const data = await eventsRes.json();
+            // Group events by date
+            events = {};
+            (data.events || []).forEach(event => {
+                const dateKey = event.start_time.split(' ')[0];
+                if (!events[dateKey]) events[dateKey] = [];
+                events[dateKey].push(event);
+            });
+            renderCalendar();
+        }
+    } catch (err) {
+        console.error('Error loading events:', err);
+    }
+
+    // Fetch agenda suggestions
+    fetchAgendaSuggestions();
+
+    // Fetch scheduling insight for placeholder
+    fetchSchedulingInsight();
+}
+
+// Initial render and auth check
+renderCalendar();
+checkAuthStatus();
 </script>
 </body>
 </html>
