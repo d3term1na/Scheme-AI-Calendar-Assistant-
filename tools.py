@@ -734,6 +734,7 @@ Examples:
 - "Add notes to my meeting with Bob yesterday: we discussed the Q1 budget" -> {{"keyword": "meeting", "participants": ["Bob"], "event_date": "yesterday's date", "notes": "Discussed the Q1 budget"}}
 - "The standup this morning covered sprint progress" -> {{"keyword": "standup", "participants": null, "event_date": "{today}", "notes": "Covered sprint progress"}}
 - "Notes for yesterday's team meeting: action items - finish design doc, review PRs" -> {{"keyword": "team meeting", "participants": null, "event_date": "yesterday's date", "notes": "Action items: finish design doc, review PRs"}}
+- "Add Notes to Product meeting on 6 Feb: look into Bob's issue with authentication" -> {{"keyword": "Product meeting", "participants": null, "event_date": "2026-02-06", "notes": "Look into Bob's issue with authentication"}}
 
 Message: {user_message}
 
@@ -1488,6 +1489,7 @@ def get_upcoming_recurring_meetings(username):
         # If we have an upcoming event and a past event with notes, generate suggestion
         if upcoming_events and last_with_notes:
             upcoming_event = upcoming_events[0]
+
             notes = last_with_notes["notes"]
 
             # Use LLM to generate agenda suggestions from notes

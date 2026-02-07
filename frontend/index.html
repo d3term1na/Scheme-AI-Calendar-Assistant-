@@ -932,7 +932,7 @@ function dismissSuggestion(eventId) {
 function useSuggestion(eventId) {
     const suggestion = currentSuggestions.find(s => s.event_id === eventId);
     if (suggestion) {
-        const agendaText = `Add notes to ${suggestion.event_title}: ${suggestion.suggested_agenda.replace(/\n/g, ' ')}`;
+        const agendaText = `Add notes to ${suggestion.event_title} on ${suggestion.event_time}: ${suggestion.suggested_agenda.replace(/\n/g, ' ')}`;
         messageInput.value = agendaText;
         messageInput.focus();
         dismissSuggestion(eventId);
