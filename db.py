@@ -74,7 +74,6 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_events_recurrence_group ON events(recurrence_group);
             CREATE INDEX IF NOT EXISTS idx_conversations_username ON conversations(username);
         """)
-    print("[DB] Database initialized successfully")
 
 
 # =============================================================================
@@ -461,7 +460,6 @@ def populate_sample_data(username: str):
     """Populate sample events for testing. Only runs if user has no events."""
     existing = get_user_events(username)
     if existing:
-        print(f"[DB] User {username} already has events, skipping sample data")
         return
 
     # Create participant users so foreign keys in user_events are satisfied
@@ -470,9 +468,6 @@ def populate_sample_data(username: str):
         if participant != username and not get_user(participant):
             password_hash = bcrypt.hashpw("test1234".encode(), bcrypt.gensalt()).decode()
             create_user(participant, password_hash)
-            print(f"[DB] Created test user: {participant}")
-
-    print(f"[DB] Populating sample events for {username}")
 
     # Weekly Team Standup - recurring series
     create_event(username, "Team Standup", "2026-01-28 08:00:00", "2026-01-28 08:30:00",
@@ -530,8 +525,16 @@ def populate_sample_data(username: str):
 
     create_event(username, "Morning Planning", "2026-02-02 08:30:00", "2026-02-02 09:00:00",
                  [], "", "morningplan1")
+    
+    # Budget Review - recurring series
+    create_event(username, "Budget Review", "2026-01-18 14:00:00", "2026-01-18 15:00:00",
+                 ["Charlie"], "", "budgetreview1")
 
-    print(f"[DB] Sample events created for {username}")
+    create_event(username, "Budget Review", "2026-01-25 14:00:00", "2026-01-25 15:00:00",
+                 ["Charlie"], "", "budgetreview1")
+
+    create_event(username, "Budget Review", "2026-02-01 14:00:00", "2026-02-01 15:00:00",
+                 ["Charlie"], "", "budgetreview1")
 
 
 # Initialize database on module import (resets on every restart)

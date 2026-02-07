@@ -35,7 +35,6 @@ def extract_timezone_from_message(user_message):
     ]
     msg_lower = user_message.lower()
     if not any(kw in msg_lower for kw in tz_keywords):
-        print("No timezone keyword found in message, skipping LLM call")
         return None
 
     extraction_prompt = f"""Does this message contain an EXPLICIT timezone abbreviation or name?
@@ -70,21 +69,17 @@ Return ONLY "null" or the IANA timezone name. Nothing else:"""
         res = requests.post(OLLAMA_URL, json=payload, timeout=30)
         res.raise_for_status()
         raw_response = res.json()["message"]["content"].strip()
-        print(f"Timezone detection raw response: '{raw_response}'")  # debug
 
         # Clean up response (keep case for ZoneInfo validation)
         response = raw_response.replace('"', '').replace("'", "").strip()
         response_lower = response.lower()
-        print(f"Timezone detection cleaned response: '{response}'")  # debug
 
         if response_lower == "null" or response_lower == "none" or not response:
-            print("No timezone detected")  # debug
             return None
 
         # Validate it's a real timezone (try original case first)
         try:
             ZoneInfo(response)
-            print(f"Valid IANA timezone found: {response}")  # debug
             return response
         except:
             pass
@@ -107,7 +102,6 @@ Return ONLY "null" or the IANA timezone name. Nothing else:"""
         }
         if response_lower in iana_formats:
             tz = iana_formats[response_lower]
-            print(f"Matched IANA timezone: {tz}")  # debug
             return tz
 
         # Try to match common abbreviations
@@ -138,13 +132,9 @@ Return ONLY "null" or the IANA timezone name. Nothing else:"""
         }
         for key, tz in tz_mapping.items():
             if key in response_lower:
-                print(f"Matched timezone abbreviation '{key}' -> {tz}")  # debug
                 return tz
-
-        print(f"Could not match timezone: {response}")  # debug
         return None
     except Exception as e:
-        print(f"Timezone extraction error: {e}")
         return None
 
 
@@ -154,7 +144,6 @@ def convert_to_local_tz(datetime_str, source_tz_name):
         return datetime_str
 
     try:
-        print(f"Converting: {datetime_str} from {source_tz_name} to SGT")  # debug
         # Parse the datetime
         dt = datetime.strptime(datetime_str, "%Y-%m-%d %H:%M:%S")
 
@@ -166,11 +155,9 @@ def convert_to_local_tz(datetime_str, source_tz_name):
         dt_local = dt_with_tz.astimezone(LOCAL_TZ)
 
         result = dt_local.strftime("%Y-%m-%d %H:%M:%S")
-        print(f"Converted result: {result}")  # debug
         # Return as string without timezone info (for storage)
         return result
     except Exception as e:
-        print(f"Timezone conversion error: {e}")
         return datetime_str
 
 
@@ -199,7 +186,6 @@ def convert_time_to_local_tz(time_str, source_tz_name):
             final_str = time_str
         return final_str, offset
     except Exception as e:
-        print(f"Time timezone conversion error: {e}")
         return time_str
 
 
@@ -261,7 +247,6 @@ def normalize_datetime(datetime_str, original_message=None):
         pass
 
     # Couldn't normalize - return None to indicate failure
-    print(f"Warning: Could not normalize datetime: {datetime_str}")
     return None
 
 
@@ -303,7 +288,6 @@ When answering questions:
         data = res.json()
         return data["message"]["content"]
     except Exception as e:
-        print("Ollama error:", e)
         return "Sorry, I couldn't process your request."
 
 
@@ -325,12 +309,12 @@ def classify_intent(user_message):
 
 CRITICAL DISTINCTION - Recurring series vs Date-based:
 - UPDATE_RECURRING/DELETE_RECURRING: Targets a recurring SERIES by name ("all my standups", "all Project Reviews")
-- BULK_RESCHEDULE/BULK_CANCEL: Targets a specific DATE ("everything today", "all meetings on Friday")
+- BULK_RESCHEDULE/BULK_CANCEL: Targets a specific DATE ("everything today", "everything tomorrow")
 
 Important:
 - "every Friday", "weekly", "every week", "daily", "for the next 4 weeks" = CREATE_RECURRING (not CREATE)
 - "schedule a meeting tomorrow" = CREATE (single event, no recurrence)
-- "Delete the standup" or "Cancel tomorrow's meeting" = DELETE (single event)
+- "Delete the standup" or "Cancel tomorrow's meeting" or "Cancel Product Testing" = DELETE (single event)
 - "Remove ALL my standups" or "Delete all Team Meetings" = DELETE_RECURRING (recurring series)
 - "Move my meeting to 3pm" or "Reschedule Product Meeting to Feb 10" = UPDATE (single event)
 - "Reschedule my dinner with Charlie to tomorrow 8am" = UPDATE (single event, no "all")
@@ -341,7 +325,7 @@ Important:
 - "Add notes to my meeting..." or "We discussed X" (STATEMENT) = ADD_NOTES intent
 - "What did we discuss?" (QUESTION about past meetings) = GENERAL intent
 
-KEY RULE: UPDATE_RECURRING and DELETE_RECURRING require the word "all" (e.g., "all my standups", "all Project Reviews"). Without "all", it is UPDATE or DELETE (single event). Also, if the user mentions a SPECIFIC DATE (like "on Feb 11", "tomorrow"), it is UPDATE or DELETE, NOT UPDATE_RECURRING or DELETE_RECURRING.
+KEY RULE: UPDATE_RECURRING and DELETE_RECURRING require the word "all" (e.g., "all my standups", "all Project Reviews"). BULK_RESCHEDULE and BULK_CANCEL require the word "everything" (e.g., "Push everything", "Cancel everything"). Without "all" or "everything", it is UPDATE or DELETE (single event). Also, if the user mentions a SPECIFIC DATE (like "on Feb 11", "tomorrow"), it is UPDATE or DELETE, NOT UPDATE_RECURRING or DELETE_RECURRING.
 
 Message: {user_message}
 
@@ -372,15 +356,12 @@ Respond with ONLY the category name:"""
         # Guard: UPDATE_RECURRING/DELETE_RECURRING require "all" in the message
         msg_lower = user_message.lower()
         if classified == "UPDATE_RECURRING" and "all" not in msg_lower:
-            print(f"Intent guard: {classified} -> UPDATE (no 'all' in message)")
             classified = "UPDATE"
         elif classified == "DELETE_RECURRING" and "all" not in msg_lower:
-            print(f"Intent guard: {classified} -> DELETE (no 'all' in message)")
             classified = "DELETE"
 
         return classified
     except Exception as e:
-        print("Intent classification error:", e)
         return "GENERAL"
 
 # Extracts event details from natural language into JSON format using LLM
@@ -397,6 +378,9 @@ Return ONLY valid JSON with these fields:
 
 Interpret relative dates like "tomorrow", "next Monday", "this Friday" relative to today.
 If no time specified, default to 09:00:00.
+Examples:
+- "Schedule a 1-hour Product Meeting tomorrow 4pm" -> title="Product Meeting", start_time=tomorrow 4pm, end_time=1 hour forward from start_time, participants=[]
+
 
 Message: {user_message}
 
@@ -450,22 +434,16 @@ JSON:"""
                 end_time = start_time
 
         # Check for timezone in user message and convert to local (SGT)
-        print(f"About to check timezone in: {user_message}")  # debug
         source_tz = extract_timezone_from_message(user_message)
-        print(f"Timezone extraction result: {source_tz}")  # debug
         if source_tz:
-            print(f"Detected timezone: {source_tz}, converting to SGT")
-            print(f"Before conversion - start: {start_time}, end: {end_time}")  # debug
             start_time = convert_to_local_tz(start_time, source_tz)
             end_time = convert_to_local_tz(end_time, source_tz)
-            print(f"After conversion - start: {start_time}, end: {end_time}")  # debug
 
         details["start_time"] = start_time
         details["end_time"] = end_time
 
         return details
     except Exception as e:
-        print("Extraction error:", e)
         # Fallback: use message as title with default time 9:00am
         default_start = now.replace(hour=9, minute=0, second=0, microsecond=0)
         if default_start < now:
@@ -564,7 +542,6 @@ JSON:"""
             "keyword": filters.get("keyword")
         }
     except Exception as e:
-        print("Filter extraction error:", e)
         return {"start_date": None, "end_date": None, "participants": None, "keyword": None}
 
 
@@ -583,6 +560,7 @@ IMPORTANT: Distinguish between CURRENT event info vs NEW values:
 - "change my 2pm meeting to 4pm" -> keyword="meeting", current_date=null (no current DATE specified, just time)
 - "change my product meeting to 9 feb 5pm" -> keyword="product meeting", current_date=null (9 feb 5pm is NEW)
 - "rename the team meeting to Sprint Review" -> keyword="team meeting", current_date=null
+- "Reschedule the Product Meeting to 11 Feb 8am." -> keyword="Product Meeting", current_date=null (11 Feb 8am is NEW, NOT current_date)
 
 Return ONLY valid JSON:
 - keyword: string or null (event type/title to search for)
@@ -618,7 +596,6 @@ JSON:"""
             "current_date": identifier.get("current_date")
         }
     except Exception as e:
-        print("Event identifier extraction error:", e)
         return {"keyword": None, "participants": None, "current_date": None}
 
 
@@ -641,12 +618,12 @@ Return ONLY valid JSON with these fields:
 Interpret relative dates like "tomorrow", "next Monday" relative to today.
 
 Examples:
-- "reschedule my meeting to 3pm tomorrow" -> {{"new_start_time": "tomorrow 15:00:00", "new_end_time": "tomorrow 15:45:00", ...rest null}}
+- "reschedule my meeting to 3pm tomorrow" -> {{"new_start_time": "tomorrow 15:00:00", ...rest null}}
 - "change the team standup to 10am" -> {{"new_start_time": "... 10:00:00", ...rest null}}
 - "rename my meeting to Project Review" -> {{"new_title": "Project Review", ...rest null}}
 - "add Bob to the meeting" -> {{"add_participants": ["Bob"], ...rest null}}
-- "move my 2pm meeting to Friday at 4pm" -> {{"new_start_time": "Friday 16:00:00", "new_end_time": "Friday 16:45:00", ...rest null}}
-- "Reschedule the Team Standup on 11 Feb to 13 Feb 8pm" -> {{"new_start_time": "2026-02-13 20:00:00", "new_end_time": "2026-02-13 20:45:00", ...rest null}} (13 Feb is the NEW date, 11 Feb is ignored)
+- "move my 2pm meeting to Friday at 4pm" -> {{"new_start_time": "Friday 16:00:00", ...rest null}}
+- "Reschedule the Team Standup on 11 Feb to 13 Feb 8pm" -> {{"new_start_time": "2026-02-13 20:00:00", ...rest null}} (13 Feb is the NEW date, 11 Feb is ignored)
 
 Message: {user_message}
 
@@ -672,7 +649,6 @@ JSON:"""
             response_text = json_match.group(1)
 
         details = json.loads(response_text.strip())
-        print(f"UPDATE details LLM response: {details}")  # debug
 
         # Normalize datetime values to ensure proper format
         # Pass the original user_message so day names like "Saturday" can be detected
@@ -684,19 +660,18 @@ JSON:"""
         if new_end:
             new_end = normalize_datetime(new_end, user_message)
 
-        # If we have start but no end, calculate end as 45 min later
-        if new_start and not new_end:
-            try:
-                start_dt = datetime.strptime(new_start, "%Y-%m-%d %H:%M:%S")
-                end_dt = start_dt + timedelta(minutes=45)
-                new_end = end_dt.strftime("%Y-%m-%d %H:%M:%S")
-            except:
-                pass
+        # # If we have start but no end, calculate end as 45 min later
+        # if new_start and not new_end:
+        #     try:
+        #         start_dt = datetime.strptime(new_start, "%Y-%m-%d %H:%M:%S")
+        #         end_dt = start_dt + timedelta(minutes=45)
+        #         new_end = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+        #     except:
+        #         pass
 
         # Check for timezone in user message and convert to local (SGT)
         source_tz = extract_timezone_from_message(user_message)
         if source_tz and new_start:
-            print(f"Detected timezone: {source_tz}, converting to SGT")
             new_start = convert_to_local_tz(new_start, source_tz)
             if new_end:
                 new_end = convert_to_local_tz(new_end, source_tz)
@@ -710,7 +685,6 @@ JSON:"""
             "remove_participants": details.get("remove_participants")
         }
     except Exception as e:
-        print("Update extraction error:", e)
         return {
             "new_title": None, "new_start_time": None, "new_end_time": None,
             "new_participants": None, "add_participants": None, "remove_participants": None
@@ -780,7 +754,6 @@ JSON:"""
             "notes": details.get("notes", "")
         }
     except Exception as e:
-        print("Notes extraction error:", e)
         return {"keyword": None, "participants": None, "event_date": None, "notes": ""}
 
 
@@ -814,8 +787,8 @@ IMPORTANT:
 
 Examples:
 - "Set a progress meeting for every friday 5pm" -> {{"title": "Progress Meeting", "time": "17:00:00", "duration_minutes": 45, "participants": [], "frequency": "weekly", "day_of_week": "friday", "occurrence_limit": 4, "end_date": null}}
-- "Weekly standup with Bob and Charlie every Monday 9am for 3 weeks" -> {{"title": "Weekly Standup", "time": "09:00:00", "duration_minutes": 45, "participants": ["Bob", "Charlie"], "frequency": "weekly", "day_of_week": "monday", "occurrence_limit": 3, "end_date": null}}
-- "Daily check-in at 10am till end of month" -> {{"title": "Daily Check-in", "time": "10:00:00", "duration_minutes": 45, "participants": [], "frequency": "daily", "day_of_week": null, "occurrence_limit": null, "end_date": "end_of_month"}}
+- "2-hour Weekly standup with Bob and Charlie every Monday 9am for 3 weeks" -> {{"title": "Weekly Standup", "time": "09:00:00", "duration_minutes": 120, "participants": ["Bob", "Charlie"], "frequency": "weekly", "day_of_week": "monday", "occurrence_limit": 3, "end_date": null}}
+- "1-hour Daily check-in at 10am till end of month" -> {{"title": "Daily Check-in", "time": "10:00:00", "duration_minutes": 60, "participants": [], "frequency": "daily", "day_of_week": null, "occurrence_limit": null, "end_date": "end_of_month"}}
 
 Message: {user_message}
 
@@ -848,7 +821,6 @@ JSON:"""
         source_tz = extract_timezone_from_message(user_message)
         if source_tz:
             days_of_week = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
-            print(f"Detected timezone: {source_tz}, converting time to SGT")
             time_value, offset = convert_time_to_local_tz(time_value, source_tz)
             if offset == -1 and details.get("day_of_week") == "monday":
                 day_of_event = "sunday"
@@ -869,7 +841,6 @@ JSON:"""
             "end_date": details.get("end_date")
         }
     except Exception as e:
-        print("Recurring extraction error:", e)
         return {
             "title": "Recurring Event",
             "time": "09:00:00",
@@ -1045,7 +1016,6 @@ JSON:"""
             "destination_date": destination_date
         }
     except Exception as e:
-        print("Bulk operation extraction error:", e)
         return {
             "source_date": today,
             "destination_date": None
@@ -1124,7 +1094,6 @@ JSON:"""
             response_text = json_match.group(1)
 
         details = json.loads(response_text.strip())
-        print(f"LLM extracted details: {details}")  # debug
 
         day_of_event = details.get("new_day")
         # Handle timezone conversion for new_time if present
@@ -1133,7 +1102,6 @@ JSON:"""
             source_tz = extract_timezone_from_message(user_message)
             if source_tz:
                 days_of_week = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
-                print(f"Detected timezone: {source_tz}, converting time to SGT")
                 new_time, offset = convert_time_to_local_tz(new_time, source_tz)
                 if offset == -1 and details.get("new_day") == "monday":
                     day_of_event = "sunday"
@@ -1150,7 +1118,6 @@ JSON:"""
             "new_participants": details.get("new_participants")
         }
     except Exception as e:
-        print("Recurring operation extraction error:", e)
         return {
             "series_keyword": None,
             "new_title": None,
@@ -1212,8 +1179,6 @@ def update_recurring_series(username, series_keyword, new_title=None, new_day=No
     Returns dict with count of updated events and list of updated events.
     """
     events = find_recurring_series_events(username, series_keyword)
-    print("Series keyword: ", series_keyword)
-    print(f"UPDATE_RECURRING_SERIES - Found {len(events)} events for '{series_keyword}'")  # debug
 
     if not events:
         return {"count": 0, "events": [], "error": f"No recurring series found matching '{series_keyword}'"}
@@ -1246,7 +1211,13 @@ def update_recurring_series(username, series_keyword, new_title=None, new_day=No
                         current_day = current_start.weekday()
                         days_diff = target_day - current_day
                         current_start = current_start + timedelta(days=days_diff)
-
+                        if day_map.get(current_weekday.lower()) > target_day and current_day > day_map.get(current_weekday.lower()):
+                            current_start = current_start + timedelta(days=7)
+                        if day_map.get(current_weekday.lower()) == target_day and new_time:
+                            if datetime.now().time() > datetime.strptime(new_time, "%H:%M:%S"):
+                                if target_day < current_day:
+                                    current_start = current_start + timedelta(days=7)
+                                
                 # If changing time
                 if new_time:
                     time_parts = new_time.split(":")
@@ -1261,15 +1232,12 @@ def update_recurring_series(username, series_keyword, new_title=None, new_day=No
                 updates["start_time"] = current_start.strftime("%Y-%m-%d %H:%M:%S")
                 updates["end_time"] = new_end.strftime("%Y-%m-%d %H:%M:%S")
             except Exception as e:
-                print(f"Error updating time for event {event.get('event_id')}: {e}")
                 continue
         if new_participants:
             updates["participants"] = new_participants
-        print(f"UPDATE_RECURRING_SERIES - Event {event.get('event_id')} '{event.get('title')}': updates={updates}")  # debug
         if updates:
             event_id = event.get("event_id")
             updated_event = db.update_event(event_id, **updates)
-            print(f"UPDATE_RECURRING_SERIES - db.update_event returned: {updated_event is not None}")  # debug
             if updated_event:
                 updated_events.append(updated_event)
 
@@ -1343,9 +1311,7 @@ def embed_existing_event_notes(username):
             content = f"Event '{event['title']}' on {date_str}: {notes}"
             store_event_embedding(event["event_id"], content)
             embedded_count += 1
-            print(f"[RAG] Embedded notes for: {event['title']} on {date_str}")
 
-    print(f"[RAG] Embedded {embedded_count} event notes into RAG")
     return embedded_count
 
 # Compare and rank vectors, retrieve top 3 contexts
@@ -1440,7 +1406,6 @@ def get_upcoming_recurring_meetings(username):
     Returns list of {event, last_occurrence_notes, suggested_agenda}
     """
     now = datetime.now()
-    print(f"[Agenda] Current time: {now}")  # debug
 
     all_events = db.get_user_events(username)
 
@@ -1467,10 +1432,8 @@ def get_upcoming_recurring_meetings(username):
                 # An event that started before now is "past"
                 if event_datetime < now:
                     past_events.append(event)
-                    print(f"[Agenda] Past event: {event['title']} at {event['start_time']} (has notes: {bool(event.get('notes'))})")  # debug
                 else:
                     upcoming_events.append(event)
-                    print(f"[Agenda] Upcoming event: {event['title']} at {event['start_time']}")  # debug
             except (ValueError, TypeError):
                 continue
 
@@ -1484,8 +1447,6 @@ def get_upcoming_recurring_meetings(username):
         for event in past_events:
             if event.get("notes") and event["notes"].strip():
                 last_with_notes = event
-                print(f"[Agenda] Found last event with notes: {event['title']} at {event['start_time']}")  # debug
-                print(f"[Agenda] Notes content: {event['notes'][:100]}...")  # debug
                 break
 
         # If we have an upcoming event and a past event with notes, generate suggestion
@@ -1538,8 +1499,6 @@ Keep each item under 15 words. Format as a simple bullet list starting with "-".
         response_text = res.json()["message"]["content"].strip()
         return response_text
     except Exception as e:
-        print(f"Error generating agenda suggestions: {e}")
-        # Fallback: extract simple action items from notes
         return extract_simple_agenda(notes)
 
 

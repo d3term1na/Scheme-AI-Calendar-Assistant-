@@ -167,7 +167,6 @@ async def chat_endpoint(request: Request):
     user_message = body.get("message", "")
 
     reply, metadata = agent_process(username, user_message)
-    print("Sending reply:", reply)  # debug
     return {
         "reply": reply,
         "requires_clarification": False,
@@ -235,7 +234,6 @@ def agent_process(username, user_message):
             store_event_embedding(event["event_id"], content)
     elif intent == "CREATE_RECURRING":
         details = extract_recurring_details(user_message)
-        print(f"Recurring details: {details}")  # debug
 
         # Calculate the dates for recurring events
         dates = calculate_recurring_dates(details)
@@ -282,7 +280,6 @@ def agent_process(username, user_message):
                     recurrence_group=recurrence_group
                 )
                 created_events.append(event)
-                print(event)
                 # Store in RAG
                 participants_info = f" with {', '.join(event['participants'])}" if event.get('participants') else ""
                 content = f"Event: {event['title']}{participants_info} scheduled for {event['start_time']}"
@@ -334,9 +331,7 @@ def agent_process(username, user_message):
 
                 metadata["events_created"] = created_events
     elif intent == "DELETE":
-        print(f"DELETE - Getting events for user: {username}")  # debug
         filters = extract_query_filters(user_message)
-        print(f"DELETE - Extracted filters: {filters}")  # debug
         events = db.query_events(
             username=username,
             start_date=filters["start_date"],
@@ -347,7 +342,6 @@ def agent_process(username, user_message):
 
         # Fallback: if no events found with keyword, try without keyword
         if not events and filters["keyword"]:
-            print("DELETE - Trying fallback without keyword filter...")  # debug
             events = db.query_events(
                 username=username,
                 start_date=filters["start_date"],
@@ -358,7 +352,6 @@ def agent_process(username, user_message):
 
         # Fallback: if still no events, try without date filter
         if not events and (filters["start_date"] or filters["end_date"]):
-            print("DELETE - Trying fallback without date filter...")  # debug
             events = db.query_events(
                 username=username,
                 participants=filters["participants"],
@@ -373,7 +366,6 @@ def agent_process(username, user_message):
             reply = "No matching events found to delete."
     elif intent == "QUERY":
         filters = extract_query_filters(user_message)
-        print(f"QUERY - Extracted filters: {filters}")  # debug
 
         # Default to current datetime onwards when no date filters are specified
         query_start = filters["start_date"]
@@ -387,7 +379,6 @@ def agent_process(username, user_message):
             participants=filters["participants"],
             keyword=filters["keyword"]
         )
-        print(f"QUERY - Found {len(events)} events")  # debug
 
         # Detect if user is asking a specific question about event details
         msg_lower = user_message.lower()
@@ -424,9 +415,7 @@ def agent_process(username, user_message):
         else:
             reply = "No events found matching your criteria."
     elif intent == "UPDATE":
-        print(f"UPDATE - Getting events for user: {username}")  # debug
         identifier = extract_event_identifier(user_message)
-        print(f"UPDATE - Extracted identifier: {identifier}")  # debug
         events = db.query_events(
             username=username,
             start_date=identifier["current_date"],
@@ -434,11 +423,16 @@ def agent_process(username, user_message):
             participants=identifier["participants"],
             keyword=identifier["keyword"]
         )
+        # Fallback: if still no events, try without date filter
+        if not events and identifier["current_date"]:
+            events = db.query_events(
+                username=username,
+                participants=identifier["participants"],
+                keyword=identifier["keyword"]
+            )
 
         # Fallback: if no events found with keyword, try without keyword
         if not events and identifier["keyword"]:
-            print("UPDATE - Trying fallback without keyword filter...")  # debug
-            print(identifier["keyword"])
             events = db.query_events(
                 username=username,
                 start_date=identifier["current_date"],
@@ -446,26 +440,10 @@ def agent_process(username, user_message):
                 participants=identifier["participants"],
                 keyword=None
             )
-            print(events)
-            print(f"UPDATE - Events found without keyword: {len(events)}")  # debug
-
-        # Fallback: if still no events, try without date filter
-        if not events and identifier["current_date"]:
-            print("UPDATE - Trying fallback without date filter...")  # debug
-            events = db.query_events(
-                username=username,
-                participants=identifier["participants"],
-                keyword=identifier["keyword"]
-            )
-            print(f"UPDATE - Events found without date: {len(events)}")  # debug
-
-        # Fallback: get all events if still none found
+            
         if not events:
-            print("UPDATE - Trying fallback to get all events...")  # debug
-            events = db.query_events(username=username)
-            print(f"UPDATE - Total events in calendar: {len(events)}")  # debug
-
-        if events:
+            reply = "No matching events found to update."
+        else:
             event = events[0]
             update_details = extract_update_details(user_message)
 
@@ -475,6 +453,9 @@ def agent_process(username, user_message):
                 updates["title"] = update_details["new_title"]
             if update_details["new_start_time"]:
                 updates["start_time"] = update_details["new_start_time"]
+                if not update_details["new_end_time"]:
+                    time_delta = dt.strptime(event["end_time"], "%Y-%m-%d %H:%M:%S") - dt.strptime(event["start_time"], "%Y-%m-%d %H:%M:%S")
+                    updates["end_time"] = (dt.strptime(updates["start_time"], "%Y-%m-%d %H:%M:%S") + time_delta).strftime("%Y-%m-%d %H:%M:%S")
             if update_details["new_end_time"]:
                 updates["end_time"] = update_details["new_end_time"]
             if update_details["new_participants"] is not None:
@@ -545,12 +526,8 @@ def agent_process(username, user_message):
                 metadata["events_updated"] = [updated]
             else:
                 reply = "I couldn't understand what you want to change. Please specify the new time, title, or participants."
-        else:
-            reply = "No matching events found to update."
     elif intent == "ADD_NOTES":
         notes_details = extract_notes_details(user_message)
-        print(f"ADD_NOTES - Notes details: {notes_details}")  # debug
-        print(f"ADD_NOTES - Searching for event_date: {notes_details['event_date']}, keyword: {notes_details['keyword']}")  # debug
 
         # Find the event to add notes to
         events = db.query_events(
@@ -560,10 +537,6 @@ def agent_process(username, user_message):
             participants=notes_details["participants"],
             keyword=notes_details["keyword"]
         )
-        print(f"ADD_NOTES - Found {len(events)} matching events")  # debug
-        if events:
-            print(f"ADD_NOTES - First match: {events[0]['title']} at {events[0]['start_time']}")  # debug
-
         # Fallback: try without date filter
         if not events and notes_details["keyword"]:
             events = db.query_events(
@@ -574,9 +547,8 @@ def agent_process(username, user_message):
 
         # Fallback: get all events if still none found
         if not events:
-            events = db.query_events(username=username)
-
-        if events and notes_details["notes"]:
+            reply = "No matching events found to add notes to."
+        elif events and notes_details["notes"]:
             event = events[0]
             # Append to existing notes or create new
             existing_notes = event.get("notes", "")
@@ -593,20 +565,16 @@ def agent_process(username, user_message):
             store_event_embedding(event["event_id"], notes_content)
         elif not notes_details["notes"]:
             reply = "I couldn't understand what notes you want to add. Please try again."
-        else:
-            reply = "No matching events found to add notes to."
     elif intent == "BULK_RESCHEDULE":
         bulk_details = extract_bulk_operation_details(user_message)
         source_date = bulk_details["source_date"]
         destination_date = bulk_details["destination_date"]
-        print(f"BULK_RESCHEDULE - source: {source_date}, destination: {destination_date}")  # debug
 
         if not source_date or not destination_date:
             reply = "I couldn't understand which dates you want to move events between. Please specify the source and destination dates."
         else:
             # Find all events on the source date
             events_to_move = db.query_events(username=username, start_date=source_date, end_date=source_date)
-            print(f"BULK_RESCHEDULE - Found {len(events_to_move)} events on {source_date}")  # debug
 
             if not events_to_move:
                 # Format date nicely
@@ -647,7 +615,6 @@ def agent_process(username, user_message):
                             updated = db.update_event(event["event_id"], start_time=new_start_str, end_time=new_end_str)
                             moved_events.append(updated)
                     except Exception as e:
-                        print(f"BULK_RESCHEDULE - Error moving event {event['title']}: {e}")
                         continue
 
                 # Build response
@@ -680,14 +647,12 @@ def agent_process(username, user_message):
     elif intent == "BULK_CANCEL":
         bulk_details = extract_bulk_operation_details(user_message)
         source_date = bulk_details["source_date"]
-        print(f"BULK_CANCEL - source: {source_date}")  # debug
 
         if not source_date:
             reply = "I couldn't understand which date you want to cancel events on. Please specify the date."
         else:
             # Find all events on the source date
             events_to_cancel = db.query_events(username=username, start_date=source_date, end_date=source_date)
-            print(f"BULK_CANCEL - Found {len(events_to_cancel)} events on {source_date}")  # debug
 
             if not events_to_cancel:
                 try:
@@ -720,7 +685,6 @@ def agent_process(username, user_message):
         # Update all events in a recurring series
         recurring_details = extract_recurring_operation_details(user_message)
         series_keyword = recurring_details.get("series_keyword")
-        print(f"UPDATE_RECURRING - series_keyword: {series_keyword}, details: {recurring_details}")  # debug
 
         if not series_keyword:
             reply = "I couldn't understand which recurring series you want to update. Please specify the meeting name."
@@ -740,7 +704,6 @@ def agent_process(username, user_message):
                 reply = result["error"]
             elif result["count"] == 0:
                 # Not a recurring series — fall back to single-event update
-                print(f"UPDATE_RECURRING fallback - treating as single event update")  # debug
                 identifier = extract_event_identifier(user_message)
                 events = db.query_events(
                     username=username,
@@ -752,9 +715,8 @@ def agent_process(username, user_message):
                 if not events and identifier["keyword"]:
                     events = db.query_events(username=username, keyword=identifier["keyword"])
                 if not events:
-                    events = db.query_events(username=username)
-
-                if events:
+                    reply = f"No events found matching '{series_keyword}'."
+                else:
                     event = events[0]
                     update_details = extract_update_details(user_message)
                     updates = {}
@@ -762,6 +724,9 @@ def agent_process(username, user_message):
                         updates["title"] = update_details["new_title"]
                     if update_details["new_start_time"]:
                         updates["start_time"] = update_details["new_start_time"]
+                        if not update_details["new_end_time"]:
+                            time_delta = dt.strptime(event["end_time"], "%Y-%m-%d %H:%M:%S") - dt.strptime(event["start_time"], "%Y-%m-%d %H:%M:%S")
+                            updates["end_time"] = (dt.strptime(updates["start_time"], "%Y-%m-%d %H:%M:%S") + time_delta).strftime("%Y-%m-%d %H:%M:%S")
                     if update_details["new_end_time"]:
                         updates["end_time"] = update_details["new_end_time"]
 
@@ -796,8 +761,6 @@ def agent_process(username, user_message):
                         metadata["events_updated"] = [updated]
                     else:
                         reply = "I couldn't understand what you want to change."
-                else:
-                    reply = f"No events found matching '{series_keyword}'."
             else:
                 # Build a descriptive response
                 change_parts = []
@@ -821,7 +784,6 @@ def agent_process(username, user_message):
         # Delete all events in a recurring series
         recurring_details = extract_recurring_operation_details(user_message)
         series_keyword = recurring_details.get("series_keyword")
-        print(f"DELETE_RECURRING - series_keyword: {series_keyword}")  # debug
 
         if not series_keyword:
             reply = "I couldn't understand which recurring series you want to delete. Please specify the meeting name."
@@ -839,7 +801,6 @@ def agent_process(username, user_message):
         # First, try to find relevant calendar events with notes
         # Extract filters to find specific events the user is asking about
         filters = extract_query_filters(user_message)
-        print(f"GENERAL - Extracted filters: {filters}")  # debug
 
         # Search for events matching the query
         relevant_events = db.query_events(
@@ -862,7 +823,6 @@ def agent_process(username, user_message):
                 except:
                     date_str = event['start_time'].split(' ')[0]
                 event_context.append(f"Meeting '{event['title']}' on {date_str}: {notes}")
-                print(f"GENERAL - Found event with notes: {event['title']}")  # debug
 
         # Also get RAG context
         query_vec = embed_model.encode(user_message)
@@ -871,7 +831,6 @@ def agent_process(username, user_message):
         # Combine event notes context with RAG context
         all_context = event_context + top_docs
         context_text = "\n".join(all_context) if all_context else "No relevant context."
-        print("Context text:", context_text)
 
         reply = call_ollama(user_message, context_text)
         metadata["retrieved_docs"] = top_docs
