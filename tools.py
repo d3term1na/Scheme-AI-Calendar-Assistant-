@@ -1497,7 +1497,7 @@ def get_upcoming_recurring_meetings(username):
                 last_with_notes["title"],
                 notes
             )
-
+            
             suggestions.append({
                 "upcoming_event": upcoming_event,
                 "last_occurrence": last_with_notes,
